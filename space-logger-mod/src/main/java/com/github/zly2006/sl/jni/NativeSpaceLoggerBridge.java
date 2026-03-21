@@ -7,6 +7,7 @@ import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 
@@ -162,6 +163,71 @@ public final class NativeSpaceLoggerBridge {
         return nativeCountByVerb(verb);
     }
 
+    public static List<QueryRow> queryRows(
+        String subject,
+        String object,
+        String verb,
+        int minX,
+        int maxX,
+        int minY,
+        int maxY,
+        int minZ,
+        int maxZ,
+        long afterTimeMs,
+        long beforeTimeMs,
+        int limit
+    ) {
+        ensureInitialized();
+
+        int safeLimit = limit <= 0 ? 20 : limit;
+        String[] encodedRows = nativeQuery(
+            safe(subject),
+            safe(object),
+            safe(verb),
+            minX,
+            maxX,
+            minY,
+            maxY,
+            minZ,
+            maxZ,
+            afterTimeMs,
+            beforeTimeMs,
+            safeLimit
+        );
+        if (encodedRows == null || encodedRows.length == 0) {
+            return Collections.emptyList();
+        }
+
+        List<QueryRow> rows = new ArrayList<>(encodedRows.length);
+        for (String encoded : encodedRows) {
+            if (encoded == null || encoded.isBlank()) {
+                continue;
+            }
+            String[] parts = encoded.split("\t", 9);
+            if (parts.length != 9) {
+                LOGGER.warn("Skipping malformed query row from JNI: {}", encoded);
+                continue;
+            }
+
+            try {
+                rows.add(new QueryRow(
+                    Long.parseLong(parts[0]),
+                    Integer.parseInt(parts[1]),
+                    Integer.parseInt(parts[2]),
+                    Integer.parseInt(parts[3]),
+                    parts[4],
+                    parts[5],
+                    parts[6],
+                    parts[7],
+                    Integer.parseInt(parts[8])
+                ));
+            } catch (NumberFormatException e) {
+                LOGGER.warn("Skipping malformed numeric fields in query row: {}", encoded, e);
+            }
+        }
+        return rows;
+    }
+
     public static void resetForTests() {
         synchronized (LOCK) {
             ensureInitialized();
@@ -234,5 +300,33 @@ public final class NativeSpaceLoggerBridge {
 
     private static native int nativeCountByVerb(String verb);
 
+    private static native String[] nativeQuery(
+        String subject,
+        String object,
+        String verb,
+        int minX,
+        int maxX,
+        int minY,
+        int maxY,
+        int minZ,
+        int maxZ,
+        long afterTimeMs,
+        long beforeTimeMs,
+        int limit
+    );
+
     private static native void nativeReset(String dbDir, int memtableFlushRows);
+
+    public record QueryRow(
+        long timeMs,
+        int x,
+        int y,
+        int z,
+        String subject,
+        String verb,
+        String object,
+        String subjectExtra,
+        int dataLen
+    ) {
+    }
 }
