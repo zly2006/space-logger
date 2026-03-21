@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "space-logger-mod",
+  "version": "${version}",
+  "name": "space-logger-mod",
+  "description": "",
+  "authors": [],
+  "contact": {},
+  "license": "All-Rights-Reserved",
+  "icon": "assets/space-logger-mod/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "client": [
+      "com.github.zly2006.sl.client.SpaceLoggerClient"
+    ],
+    "main": [
+      "com.github.zly2006.sl.SpaceLogger"
+    ]
+  },
+  "mixins": [
+    "space-logger-mod.mixins.json",
+    {
+      "config": "space-logger-mod.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=0.16",
+    "fabric-language-kotlin": "*",
+    "fabric-api": "*",
+    "minecraft": "*"
+  }
+}
