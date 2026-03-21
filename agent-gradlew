@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="${ROOT_DIR}/space-logger-mod"
+JAVA25_HOME="${SPACE_LOGGER_JAVA_HOME:-/opt/homebrew/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home}"
+GRADLE_BIN="${SPACE_LOGGER_GRADLE_BIN:-${HOME}/.gradle/wrapper/dists/gradle-9.2.1-bin/2t0n5ozlw9xmuyvbp7dnzaxug/gradle-9.2.1/bin/gradle}"
+GAMETEST_REPORT="${SPACE_LOGGER_GAMETEST_REPORT:-/tmp/space-logger-gametest.xml}"
+DEFAULT_JAVA_TOOL_OPTIONS="-Dfabric-api.gametest=true -Dfabric-api.gametest.report-file=${GAMETEST_REPORT}"
+
+if [[ -n "${JAVA_TOOL_OPTIONS:-}" ]]; then
+  export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS} ${DEFAULT_JAVA_TOOL_OPTIONS}"
+else
+  export JAVA_TOOL_OPTIONS="${DEFAULT_JAVA_TOOL_OPTIONS}"
+fi
+
+export JAVA_HOME="${JAVA25_HOME}"
+
+exec "${GRADLE_BIN}" -p "${PROJECT_DIR}" "$@" \
+  -Dorg.gradle.java.installations.paths="${JAVA25_HOME}"
