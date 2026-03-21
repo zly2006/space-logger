@@ -131,7 +131,10 @@ fn bench_range_query(c: &mut Criterion) {
         verb: Some("click".to_string()),
     };
 
-    let warmup_hits = db.query(&query).expect("warmup query should succeed").len() as u64;
+    let warmup_hits = db
+        .query(&query, None)
+        .expect("warmup query should succeed")
+        .len() as u64;
 
     let mut group = c.benchmark_group("range_query");
     group.sample_size(20);
@@ -142,7 +145,7 @@ fn bench_range_query(c: &mut Criterion) {
     group.bench_function("xyz_time_subject_verb", |b| {
         b.iter(|| {
             let rows = db
-                .query(black_box(&query))
+                .query(black_box(&query), None)
                 .expect("query should succeed during benchmark");
             black_box(rows.len())
         });

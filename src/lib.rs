@@ -746,7 +746,7 @@ impl SpaceLoggerDb {
         Ok(())
     }
 
-    pub fn query(&self, query: &Query) -> Result<Vec<Row>, DbError> {
+    pub fn query(&self, query: &Query, limit: Option<usize>) -> Result<Vec<Row>, DbError> {
         let state = self.state.read().map_err(|_| DbError::PoisonedLock)?;
 
         let mut rows_with_seq = Vec::new();
@@ -755,11 +755,74 @@ impl SpaceLoggerDb {
         }
         rows_with_seq.extend(state.memtable.query(query));
 
-        rows_with_seq.sort_unstable_by_key(|(seq, _)| *seq);
+        rows_with_seq.sort_unstable_by(|(left_seq, _), (right_seq, _)| right_seq.cmp(left_seq));
+        let limit = limit.unwrap_or(rows_with_seq.len());
+
         Ok(rows_with_seq
             .into_iter()
+            .take(limit)
             .map(|(_, row)| row)
             .collect::<Vec<_>>())
+    }
+
+    pub fn delete_where(&self, query: &Query) -> Result<usize, DbError> {
+        let mut state = self.state.write().map_err(|_| DbError::PoisonedLock)?;
+
+        if !state.memtable.is_empty() {
+            self.flush_locked(&mut state)?;
+        }
+
+        let old_paths = state
+            .segments
+            .iter()
+            .map(|segment| segment.path.clone())
+            .collect::<Vec<_>>();
+
+        let mut kept_rows = Vec::new();
+        let mut deleted = 0usize;
+        for segment in &state.segments {
+            for row_id in 0..segment.columns.len() {
+                if row_id_matches_query(&segment.columns, row_id, query) {
+                    deleted += 1;
+                } else {
+                    kept_rows.push((segment.columns.seq[row_id], segment.columns.row_at(row_id)));
+                }
+            }
+        }
+
+        if deleted == 0 {
+            return Ok(0);
+        }
+
+        for path in &old_paths {
+            if let Err(err) = fs::remove_file(path) {
+                if err.kind() != ErrorKind::NotFound {
+                    return Err(DbError::Io(err));
+                }
+            }
+        }
+
+        kept_rows.sort_unstable_by_key(|(seq, _)| *seq);
+        state.segments.clear();
+        state.wal.truncate()?;
+
+        if !kept_rows.is_empty() {
+            let mut columns = ColumnStore::default();
+            for (seq, row) in kept_rows {
+                columns.push(seq, &row);
+            }
+
+            let segment_id = state.next_segment_id;
+            let path = self.segments_dir.join(format!("segment_{segment_id}.bin"));
+            persist_segment(&path, &columns)?;
+
+            state
+                .segments
+                .push(Segment::from_columns(segment_id, path, columns));
+            state.next_segment_id += 1;
+        }
+
+        Ok(deleted)
     }
 
     pub fn db_dir(&self) -> &Path {
@@ -899,27 +962,28 @@ fn materialize_matches(
 ) -> Vec<(u64, Row)> {
     row_ids
         .into_iter()
-        .filter(|row_id| {
-            let row_id = *row_id;
-            matches_int(columns.x[row_id], query.x.as_ref())
-                && matches_int(columns.y[row_id], query.y.as_ref())
-                && matches_int(columns.z[row_id], query.z.as_ref())
-                && matches_long(columns.time_ms[row_id], query.time_ms.as_ref())
-                && query
-                    .subject
-                    .as_ref()
-                    .is_none_or(|subject| columns.subject[row_id] == *subject)
-                && query
-                    .object
-                    .as_ref()
-                    .is_none_or(|object| columns.object[row_id] == *object)
-                && query
-                    .verb
-                    .as_ref()
-                    .is_none_or(|verb| columns.verb[row_id] == *verb)
-        })
+        .filter(|row_id| row_id_matches_query(columns, *row_id, query))
         .map(|row_id| (columns.seq[row_id], columns.row_at(row_id)))
         .collect::<Vec<_>>()
+}
+
+fn row_id_matches_query(columns: &ColumnStore, row_id: usize, query: &Query) -> bool {
+    matches_int(columns.x[row_id], query.x.as_ref())
+        && matches_int(columns.y[row_id], query.y.as_ref())
+        && matches_int(columns.z[row_id], query.z.as_ref())
+        && matches_long(columns.time_ms[row_id], query.time_ms.as_ref())
+        && query
+            .subject
+            .as_ref()
+            .is_none_or(|subject| columns.subject[row_id] == *subject)
+        && query
+            .object
+            .as_ref()
+            .is_none_or(|object| columns.object[row_id] == *object)
+        && query
+            .verb
+            .as_ref()
+            .is_none_or(|verb| columns.verb[row_id] == *verb)
 }
 
 fn matches_int(value: i32, predicate: Option<&IntPredicate>) -> bool {
