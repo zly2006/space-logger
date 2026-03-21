@@ -138,17 +138,20 @@ public final class SpaceLoggerCommand {
         line.append(Component.literal(" "));
         line.append(Component.literal(row.verb()).withStyle(ChatFormatting.GOLD));
         line.append(Component.literal(" "));
+        line.append(Component.literal(row.object()).withStyle(ChatFormatting.YELLOW));
+        line.append(Component.literal(" "));
         line.append(Component.literal(coordText).withStyle(style ->
             style.withColor(ChatFormatting.GREEN)
-                .withUnderlined(true)
                 .withHoverEvent(new HoverEvent.ShowText(Component.literal("点击可传送")))
                 .withClickEvent(new ClickEvent.RunCommand(tpCommand))
         ));
-        line.append(Component.literal(" "));
-        line.append(Component.literal("(+" + row.dataLen() + ")").withStyle(style ->
-            style.withColor(ChatFormatting.DARK_GRAY)
-                .withHoverEvent(new HoverEvent.ShowText(Component.literal("nbt数据大小: " + row.dataLen() + " bytes")))
-        ));
+        if (row.dataLen() > 0) {
+            line.append(Component.literal(" "));
+            line.append(Component.literal("(+" + row.dataLen() + ")").withStyle(style ->
+                    style.withColor(ChatFormatting.DARK_GRAY)
+                            .withHoverEvent(new HoverEvent.ShowText(Component.literal("nbt数据大小: " + row.dataLen() + " bytes")))
+            ));
+        }
         return line;
     }
 
