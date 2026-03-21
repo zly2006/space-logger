@@ -17,10 +17,12 @@ import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.ClickEvent;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.HoverEvent;
 import net.minecraft.network.chat.MutableComponent;
+import net.minecraft.resources.Identifier;
 import net.minecraft.server.level.ServerPlayer;
 
 public final class SpaceLoggerCommand {
@@ -138,7 +140,7 @@ public final class SpaceLoggerCommand {
         line.append(Component.literal(" "));
         line.append(Component.literal(row.verb()).withStyle(ChatFormatting.GOLD));
         line.append(Component.literal(" "));
-        line.append(Component.literal(row.object()).withStyle(ChatFormatting.YELLOW));
+        line.append(formatObjectComponent(row.object()).withStyle(ChatFormatting.YELLOW));
         line.append(Component.literal(" "));
         line.append(Component.literal(coordText).withStyle(style ->
             style.withColor(ChatFormatting.GREEN)
@@ -153,6 +155,29 @@ public final class SpaceLoggerCommand {
             ));
         }
         return line;
+    }
+
+    private static MutableComponent formatObjectComponent(String objectRaw) {
+        if (objectRaw == null || objectRaw.isBlank()) {
+            return Component.literal("");
+        }
+
+        Identifier objectId = Identifier.tryParse(objectRaw);
+        if (objectId == null) {
+            return Component.literal(objectRaw);
+        }
+
+        if (BuiltInRegistries.ITEM.containsKey(objectId)) {
+            return Component.translatable(BuiltInRegistries.ITEM.getValue(objectId).getDescriptionId());
+        }
+        if (BuiltInRegistries.BLOCK.containsKey(objectId)) {
+            return Component.translatable(objectId.toLanguageKey("block"));
+        }
+        if (BuiltInRegistries.ENTITY_TYPE.containsKey(objectId)) {
+            return Component.translatable(BuiltInRegistries.ENTITY_TYPE.getValue(objectId).getDescriptionId());
+        }
+
+        return Component.literal(objectRaw);
     }
 
     private static String formatRelativeTime(long eventTimeMs, long nowMs) {
