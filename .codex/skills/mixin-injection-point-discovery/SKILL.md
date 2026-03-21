@@ -58,6 +58,14 @@ javap -classpath "$JAR" -p net.minecraft.some.TargetClass | sed -n '1,300p'
 - Add runtime guards (container type, block entity presence, action type, non-empty stacks).
 - Prefer extra guard code over fragile `ordinal`-based injection.
 
+9. If mixin body must call inherited base-class methods directly, use subclass-style mixin shape.
+- Pattern:
+  - `@Mixin(TargetClass.class)`
+  - `abstract class XMixin extends TargetBaseClass`
+  - add a fake constructor that matches base constructor and calls `super(...)`
+- The constructor is never called at runtime by normal game flow; it only satisfies Java type/compile constraints.
+- Use this when plain `@Shadow` is not enough and you need direct inherited method access from the mixin type itself.
+
 ## Selection Heuristics (Minecraft 26.1 unobfuscated)
 
 - Combat hit amount: `LivingEntity.actuallyHurt(ServerLevel, DamageSource, float)`
@@ -90,6 +98,7 @@ javap -classpath "$JAR" -p net.minecraft.nbt.NbtIo
 - Injecting at `HEAD` for outcomes that are only known at return time.
 - Assuming mapped names from Yarn/Mojmap docs when current jar is unobfuscated snapshot/RC.
 - Relying on local variable capture without bytecode confirmation.
+- Calling inherited base methods from mixin without subclass-shape setup (`extends` + fake ctor), leading to compile-time access issues.
 
 ## Done Criteria
 

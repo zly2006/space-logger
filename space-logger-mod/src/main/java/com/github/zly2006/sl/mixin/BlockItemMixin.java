@@ -1,6 +1,7 @@
 package com.github.zly2006.sl.mixin;
 
-import com.github.zly2006.sl.logging.SpaceLoggerEventSink;
+import com.github.zly2006.sl.jni.NativeSpaceLoggerBridge;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionResult;
@@ -28,14 +29,14 @@ public abstract class BlockItemMixin {
 
         BlockPos pos = context.getClickedPos();
         BlockItem self = (BlockItem) (Object) this;
-        SpaceLoggerEventSink.log(
+        NativeSpaceLoggerBridge.appendNow(
             pos.getX(),
             pos.getY(),
             pos.getZ(),
-            SpaceLoggerEventSink.subject(serverPlayer),
+            NativeSpaceLoggerBridge.subject(serverPlayer),
             "place",
-            SpaceLoggerEventSink.normalizeIdentifier(net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(self.getBlock())),
-            SpaceLoggerEventSink.subjectExtra(serverPlayer),
+            NativeSpaceLoggerBridge.normalizeIdentifier(BuiltInRegistries.BLOCK.getKey(self.getBlock())),
+            NativeSpaceLoggerBridge.subjectExtra(serverPlayer),
             new byte[0]
         );
     }

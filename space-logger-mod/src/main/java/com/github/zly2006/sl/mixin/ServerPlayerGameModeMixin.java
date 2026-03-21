@@ -1,6 +1,6 @@
 package com.github.zly2006.sl.mixin;
 
-import com.github.zly2006.sl.logging.SpaceLoggerEventSink;
+import com.github.zly2006.sl.jni.NativeSpaceLoggerBridge;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -44,14 +44,14 @@ public abstract class ServerPlayerGameModeMixin {
             return;
         }
 
-        SpaceLoggerEventSink.log(
+        NativeSpaceLoggerBridge.appendNow(
             pos.getX(),
             pos.getY(),
             pos.getZ(),
-            SpaceLoggerEventSink.subject(this.player),
+            NativeSpaceLoggerBridge.subject(this.player),
             "break",
-            SpaceLoggerEventSink.blockId(this.sl$breakStateBefore),
-            SpaceLoggerEventSink.subjectExtra(this.player),
+            NativeSpaceLoggerBridge.blockId(this.sl$breakStateBefore),
+            NativeSpaceLoggerBridge.subjectExtra(this.player),
             new byte[0]
         );
     }
@@ -76,14 +76,14 @@ public abstract class ServerPlayerGameModeMixin {
             return;
         }
 
-        SpaceLoggerEventSink.log(
+        NativeSpaceLoggerBridge.appendNow(
             pos.getX(),
             pos.getY(),
             pos.getZ(),
-            SpaceLoggerEventSink.subject(player),
+            NativeSpaceLoggerBridge.subject(player),
             "use",
-            SpaceLoggerEventSink.blockId(state),
-            SpaceLoggerEventSink.subjectExtra(player),
+            NativeSpaceLoggerBridge.blockId(state),
+            NativeSpaceLoggerBridge.subjectExtra(player),
             new byte[0]
         );
     }

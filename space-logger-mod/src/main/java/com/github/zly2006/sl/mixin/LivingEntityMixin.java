@@ -1,12 +1,14 @@
 package com.github.zly2006.sl.mixin;
 
-import com.github.zly2006.sl.logging.SpaceLoggerEventSink;
+import com.github.zly2006.sl.jni.NativeSpaceLoggerBridge;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.level.Level;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
@@ -15,24 +17,19 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(LivingEntity.class)
-public abstract class LivingEntityMixin {
+public abstract class LivingEntityMixin extends Entity  {
     @Unique
     private float sl$healthBeforeHurt;
+
+    public LivingEntityMixin(EntityType<?> type, Level level) {
+        super(type, level);
+    }
 
     @Shadow
     public abstract float getHealth();
 
     @Shadow
-    public abstract boolean isRemoved();
-
-    @Shadow
     protected boolean dead;
-
-    @Shadow
-    public abstract java.util.UUID getUUID();
-
-    @Shadow
-    public abstract BlockPos blockPosition();
 
     @Shadow
     public abstract LivingEntity getKillCredit();
@@ -56,15 +53,15 @@ public abstract class LivingEntityMixin {
 
         LivingEntity target = (LivingEntity) (Object) this;
         BlockPos pos = target.blockPosition();
-        SpaceLoggerEventSink.log(
+        NativeSpaceLoggerBridge.appendNow(
             pos.getX(),
             pos.getY(),
             pos.getZ(),
-            SpaceLoggerEventSink.subject(serverPlayer),
+            NativeSpaceLoggerBridge.subject(serverPlayer),
             "hurt",
-            SpaceLoggerEventSink.entityId(target),
-            SpaceLoggerEventSink.subjectExtra(serverPlayer),
-            SpaceLoggerEventSink.encodeHurtData(this.getUUID(), dealt)
+            NativeSpaceLoggerBridge.entityId(target),
+            NativeSpaceLoggerBridge.subjectExtra(serverPlayer),
+            NativeSpaceLoggerBridge.encodeHurtData(this.getUUID(), dealt)
         );
     }
 
@@ -88,15 +85,15 @@ public abstract class LivingEntityMixin {
 
         LivingEntity target = (LivingEntity) (Object) this;
         BlockPos pos = target.blockPosition();
-        SpaceLoggerEventSink.log(
+        NativeSpaceLoggerBridge.appendNow(
             pos.getX(),
             pos.getY(),
             pos.getZ(),
-            SpaceLoggerEventSink.subject(killer),
+            NativeSpaceLoggerBridge.subject(killer),
             "kill",
-            SpaceLoggerEventSink.entityId(target),
-            SpaceLoggerEventSink.subjectExtra(killer),
-            SpaceLoggerEventSink.encodeEntityNbt(target)
+            NativeSpaceLoggerBridge.entityId(target),
+            NativeSpaceLoggerBridge.subjectExtra(killer),
+            NativeSpaceLoggerBridge.encodeEntityNbt(target)
         );
     }
 }

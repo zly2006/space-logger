@@ -15,6 +15,9 @@
     ],
     "main": [
       "com.github.zly2006.sl.SpaceLogger"
+    ],
+    "fabric-gametest": [
+      "com.github.zly2006.sl.gametest.SpaceLoggerGameTests"
     ]
   },
   "mixins": [
