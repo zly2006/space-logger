@@ -180,6 +180,13 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
         nativeReset(requireNativePtr());
     }
 
+    public void flush() {
+        boolean ok = nativeFlush(requireNativePtr());
+        if (!ok) {
+            throw new IllegalStateException("native flush returned false");
+        }
+    }
+
     private static void ensureNativeLoaded(Path gameDir) {
         synchronized (LIB_LOCK) {
             if (loaded) {
@@ -400,6 +407,8 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
     );
 
     private static native void nativeReset(long nativePtr);
+
+    private static native boolean nativeFlush(long nativePtr);
 
     public record QueryRow(
         long timeMs,

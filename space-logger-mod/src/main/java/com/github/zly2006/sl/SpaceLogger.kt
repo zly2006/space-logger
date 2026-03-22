@@ -3,10 +3,13 @@ package com.github.zly2006.sl
 import com.github.zly2006.sl.command.SpaceLoggerCommand
 import com.github.zly2006.sl.jni.NativeSpaceLoggerBridge
 import net.fabricmc.api.ModInitializer
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents
 import net.fabricmc.loader.api.FabricLoader
+import org.slf4j.LoggerFactory
 
 class SpaceLogger : ModInitializer {
     companion object {
+        private val LOGGER = LoggerFactory.getLogger("space-logger-mod/SpaceLogger")
         @Volatile
         private var bridgeInstance: NativeSpaceLoggerBridge? = null
 
@@ -24,6 +27,17 @@ class SpaceLogger : ModInitializer {
             gameDir.resolve("space-logger-db"),
             4096
         )
+        ServerLifecycleEvents.SERVER_STOPPING.register {
+            val bridge = bridgeInstance
+            if (bridge == null || bridge.isClosed) {
+                return@register
+            }
+            try {
+                bridge.flush()
+            } catch (e: Exception) {
+                LOGGER.error("Failed to flush native space logger during server stop", e)
+            }
+        }
         SpaceLoggerCommand.register()
     }
 }

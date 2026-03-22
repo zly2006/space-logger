@@ -529,3 +529,38 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
     };
     *guard = Some(reopened);
 }
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeFlush(
+    mut env: JNIEnv,
+    _class: JClass,
+    native_ptr: jlong,
+) -> jboolean {
+    let native = match handle_from_ptr(native_ptr) {
+        Ok(handle) => handle,
+        Err(e) => {
+            throw_runtime(&mut env, e);
+            return JNI_FALSE;
+        }
+    };
+
+    let guard = match native.db.read() {
+        Ok(lock) => lock,
+        Err(_) => {
+            throw_runtime(&mut env, "native db lock poisoned");
+            return JNI_FALSE;
+        }
+    };
+    let Some(db) = guard.as_ref() else {
+        throw_runtime(&mut env, "native db is not initialized");
+        return JNI_FALSE;
+    };
+
+    match db.flush() {
+        Ok(()) => JNI_TRUE,
+        Err(e) => {
+            throw_runtime(&mut env, format!("flush failed: {e}"));
+            JNI_FALSE
+        }
+    }
+}
