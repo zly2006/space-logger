@@ -13,6 +13,8 @@ const AUTO_COMPACTION_TRIGGER_SEGMENTS: usize = 64;
 const AUTO_COMPACTION_BATCH_SEGMENTS: usize = 8;
 const SEGMENT_V2_MAGIC: [u8; 8] = *b"SLSEGv2\0";
 const SEGMENT_V2_HEADER_LEN: u64 = 36;
+const INVENTORY_DATA_MAGIC: [u8; 4] = *b"SLI1";
+const INVENTORY_DATA_HEADER_LEN: usize = 12;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Row {
@@ -1181,7 +1183,16 @@ impl SpaceLoggerDb {
 
         let segment_id = state.next_segment_id;
         let path = self.segments_dir.join(format!("segment_{segment_id}.bin"));
-        let columns = state.memtable.to_column_store();
+        let mut columns = state.memtable.to_column_store();
+        columns = consolidate_inventory_remove_add_on_flush(columns);
+
+        if columns.is_empty() {
+            state.memtable.clear();
+            state.wal.truncate()?;
+            persist_segment_catalog(&self.db_dir, &state.segments)?;
+            return Ok(());
+        }
+
         let index = SegmentIndex::build(&columns);
 
         let storage = persist_segment(&path, &columns, &index)?;
@@ -1462,6 +1473,211 @@ fn enforce_same_location_kill_limit(columns: ColumnStore, limit: usize) -> Colum
         }
     }
     filtered
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InventoryMergeKey {
+    subject: String,
+    object: String,
+    identity: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct InventoryDeltaInfo {
+    quantity_delta: i32,
+    payload_end: usize,
+}
+
+fn consolidate_inventory_remove_add_on_flush(mut columns: ColumnStore) -> ColumnStore {
+    if columns.is_empty() {
+        return columns;
+    }
+
+    let row_count = columns.len();
+    let mut keep = vec![true; row_count];
+
+    let mut run_start = 0usize;
+    while run_start < row_count {
+        if !is_inventory_operation(columns.verb[run_start].as_str()) {
+            run_start += 1;
+            continue;
+        }
+
+        let run_pos = (
+            columns.x[run_start],
+            columns.y[run_start],
+            columns.z[run_start],
+        );
+        let mut run_end = run_start + 1;
+        while run_end < row_count {
+            if !is_inventory_operation(columns.verb[run_end].as_str()) {
+                break;
+            }
+
+            let pos = (columns.x[run_end], columns.y[run_end], columns.z[run_end]);
+            if pos != run_pos {
+                break;
+            }
+            run_end += 1;
+        }
+
+        consolidate_inventory_run(&mut columns, &mut keep, run_start, run_end);
+        run_start = run_end;
+    }
+
+    if keep.iter().all(|v| *v) {
+        return columns;
+    }
+
+    let mut filtered = ColumnStore::default();
+    for row_id in 0..row_count {
+        if keep[row_id] {
+            filtered.seq.push(columns.seq[row_id]);
+            filtered.x.push(columns.x[row_id]);
+            filtered.y.push(columns.y[row_id]);
+            filtered.z.push(columns.z[row_id]);
+            filtered.subject.push(columns.subject[row_id].clone());
+            filtered.object.push(columns.object[row_id].clone());
+            filtered.verb.push(columns.verb[row_id].clone());
+            filtered.time_ms.push(columns.time_ms[row_id]);
+            filtered
+                .subject_extra
+                .push(columns.subject_extra[row_id].clone());
+            filtered.data.push(columns.data[row_id].clone());
+        }
+    }
+    filtered
+}
+
+fn consolidate_inventory_run(
+    columns: &mut ColumnStore,
+    keep: &mut [bool],
+    run_start: usize,
+    run_end: usize,
+) {
+    let mut current_key: Option<InventoryMergeKey> = None;
+    let mut pending_remove_row_ids: Vec<usize> = Vec::new();
+
+    for row_id in run_start..run_end {
+        if !keep[row_id] {
+            continue;
+        }
+
+        let Some(delta_info) = parse_inventory_delta_info(&columns.data[row_id]) else {
+            current_key = None;
+            pending_remove_row_ids.clear();
+            continue;
+        };
+
+        let verb = columns.verb[row_id].as_str();
+        let is_remove = verb == "remove_item" && delta_info.quantity_delta < 0;
+        let is_add = verb == "add_item" && delta_info.quantity_delta > 0;
+        if !is_remove && !is_add {
+            current_key = None;
+            pending_remove_row_ids.clear();
+            continue;
+        }
+
+        let key = InventoryMergeKey {
+            subject: columns.subject[row_id].clone(),
+            object: columns.object[row_id].clone(),
+            identity: columns.data[row_id][8..delta_info.payload_end].to_vec(),
+        };
+        if current_key.as_ref() != Some(&key) {
+            current_key = Some(key);
+            pending_remove_row_ids.clear();
+        }
+
+        if is_remove {
+            pending_remove_row_ids.push(row_id);
+            continue;
+        }
+
+        let mut remaining_add = i64::from(delta_info.quantity_delta);
+        while remaining_add > 0 {
+            let Some(&remove_row_id) = pending_remove_row_ids.last() else {
+                break;
+            };
+
+            if !keep[remove_row_id] {
+                pending_remove_row_ids.pop();
+                continue;
+            }
+
+            let Some(remove_delta) = read_inventory_delta(&columns.data[remove_row_id]) else {
+                pending_remove_row_ids.pop();
+                continue;
+            };
+            if remove_delta >= 0 {
+                pending_remove_row_ids.pop();
+                continue;
+            }
+
+            let remove_abs = -(i64::from(remove_delta));
+            let matched = remaining_add.min(remove_abs);
+            let new_remove_abs = remove_abs - matched;
+            remaining_add -= matched;
+
+            if new_remove_abs == 0 {
+                keep[remove_row_id] = false;
+                pending_remove_row_ids.pop();
+            } else if let Ok(new_remove_i32) = i32::try_from(new_remove_abs) {
+                if !write_inventory_delta(&mut columns.data[remove_row_id], -new_remove_i32) {
+                    pending_remove_row_ids.pop();
+                }
+            } else {
+                pending_remove_row_ids.pop();
+            }
+        }
+
+        if remaining_add == 0 {
+            keep[row_id] = false;
+        } else if remaining_add != i64::from(delta_info.quantity_delta) {
+            if let Ok(new_add_i32) = i32::try_from(remaining_add) {
+                let _ = write_inventory_delta(&mut columns.data[row_id], new_add_i32);
+            }
+        }
+    }
+}
+
+fn is_inventory_operation(verb: &str) -> bool {
+    verb == "add_item" || verb == "remove_item"
+}
+
+fn parse_inventory_delta_info(data: &[u8]) -> Option<InventoryDeltaInfo> {
+    if data.len() < INVENTORY_DATA_HEADER_LEN {
+        return None;
+    }
+    if data[0..4] != INVENTORY_DATA_MAGIC {
+        return None;
+    }
+
+    let quantity_delta = i32::from_le_bytes(data[4..8].try_into().ok()?);
+    let payload_len = u32::from_le_bytes(data[8..12].try_into().ok()?) as usize;
+    let payload_end = INVENTORY_DATA_HEADER_LEN.checked_add(payload_len)?;
+    if payload_end > data.len() {
+        return None;
+    }
+
+    Some(InventoryDeltaInfo {
+        quantity_delta,
+        payload_end,
+    })
+}
+
+fn read_inventory_delta(data: &[u8]) -> Option<i32> {
+    parse_inventory_delta_info(data).map(|info| info.quantity_delta)
+}
+
+fn write_inventory_delta(data: &mut [u8], quantity_delta: i32) -> bool {
+    if data.len() < 8 {
+        return false;
+    }
+    if data[0..4] != INVENTORY_DATA_MAGIC {
+        return false;
+    }
+    data[4..8].copy_from_slice(&quantity_delta.to_le_bytes());
+    true
 }
 
 fn sort_segments_by_seq(segments: &mut [Segment]) {

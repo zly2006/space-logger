@@ -7,6 +7,16 @@ use space_logger::{DbOptions, IntPredicate, LongPredicate, Query, Row, SpaceLogg
 
 const SEGMENT_V2_MAGIC: [u8; 8] = *b"SLSEGv2\0";
 const SEGMENT_V2_HEADER_LEN: usize = 36;
+const INVENTORY_DATA_MAGIC: [u8; 4] = *b"SLI1";
+
+fn inventory_delta_data(quantity_delta: i32, nbt_payload: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(12 + nbt_payload.len());
+    bytes.extend_from_slice(&INVENTORY_DATA_MAGIC);
+    bytes.extend_from_slice(&quantity_delta.to_le_bytes());
+    bytes.extend_from_slice(&(nbt_payload.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(nbt_payload);
+    bytes
+}
 
 fn sample_row(seed: i32) -> Row {
     Row {
@@ -1177,6 +1187,204 @@ fn kill_limit_is_applied_during_compaction_when_background_disabled() {
         after_compact.len(),
         2,
         "manual compaction should enforce kill cap policy"
+    );
+
+    let fail = db
+        .query(&no_match_query(), None)
+        .expect("query should work");
+    assert_eq!(fail.len(), 0, "failure case should have no rows");
+
+    std::fs::remove_dir_all(db_dir).ok();
+}
+
+#[test]
+fn flush_merges_continuous_remove_then_add_item_rows() {
+    let db_dir = fresh_db_dir("flush_merges_continuous_remove_then_add_item_rows");
+    let db = SpaceLoggerDb::open(
+        &db_dir,
+        DbOptions {
+            memtable_flush_rows: 1024,
+            ..DbOptions::default()
+        },
+    )
+    .expect("open should succeed");
+
+    let remove_row = Row {
+        x: 10,
+        y: 64,
+        z: 10,
+        subject: "alice".to_string(),
+        object: "dirt".to_string(),
+        verb: "remove_item".to_string(),
+        time_ms: 1_800_000_000_001,
+        subject_extra: "uuid-alice".to_string(),
+        data: inventory_delta_data(-4, &[1, 2, 3, 4, 5]),
+    };
+    let add_row = Row {
+        x: 10,
+        y: 64,
+        z: 10,
+        subject: "alice".to_string(),
+        object: "dirt".to_string(),
+        verb: "add_item".to_string(),
+        time_ms: 1_800_000_000_002,
+        subject_extra: "uuid-alice".to_string(),
+        data: inventory_delta_data(4, &[1, 2, 3, 4, 5]),
+    };
+
+    let version = db.current_version();
+    db.insert_with_version(remove_row, version)
+        .expect("insert remove should succeed");
+    let version = db.current_version();
+    db.insert_with_version(add_row, version)
+        .expect("insert add should succeed");
+
+    db.flush().expect("flush should succeed");
+
+    let remove_query = Query {
+        x: Some(IntPredicate {
+            eq: Some(10),
+            ..IntPredicate::default()
+        }),
+        y: Some(IntPredicate {
+            eq: Some(64),
+            ..IntPredicate::default()
+        }),
+        z: Some(IntPredicate {
+            eq: Some(10),
+            ..IntPredicate::default()
+        }),
+        subject: Some("alice".to_string()),
+        object: Some("dirt".to_string()),
+        verb: Some("remove_item".to_string()),
+        ..Query::default()
+    };
+    let add_query = Query {
+        verb: Some("add_item".to_string()),
+        ..remove_query.clone()
+    };
+
+    let remove_rows = db
+        .query(&remove_query, None)
+        .expect("query remove should succeed");
+    let add_rows = db
+        .query(&add_query, None)
+        .expect("query add should succeed");
+    assert_eq!(
+        remove_rows.len(),
+        0,
+        "continuous remove then add rows should cancel during flush"
+    );
+    assert_eq!(
+        add_rows.len(),
+        0,
+        "continuous remove then add rows should cancel during flush"
+    );
+
+    let fail = db
+        .query(&no_match_query(), None)
+        .expect("query should work");
+    assert_eq!(fail.len(), 0, "failure case should have no rows");
+
+    std::fs::remove_dir_all(db_dir).ok();
+}
+
+#[test]
+fn flush_does_not_merge_when_non_item_operation_breaks_sequence() {
+    let db_dir = fresh_db_dir("flush_does_not_merge_when_non_item_operation_breaks_sequence");
+    let db = SpaceLoggerDb::open(
+        &db_dir,
+        DbOptions {
+            memtable_flush_rows: 1024,
+            ..DbOptions::default()
+        },
+    )
+    .expect("open should succeed");
+
+    let rows = vec![
+        Row {
+            x: 20,
+            y: 70,
+            z: 20,
+            subject: "alice".to_string(),
+            object: "dirt".to_string(),
+            verb: "remove_item".to_string(),
+            time_ms: 1_800_000_000_011,
+            subject_extra: "uuid-alice".to_string(),
+            data: inventory_delta_data(-2, &[9, 9, 9]),
+        },
+        Row {
+            x: 20,
+            y: 70,
+            z: 20,
+            subject: "alice".to_string(),
+            object: "stone".to_string(),
+            verb: "use".to_string(),
+            time_ms: 1_800_000_000_012,
+            subject_extra: "uuid-alice".to_string(),
+            data: vec![],
+        },
+        Row {
+            x: 20,
+            y: 70,
+            z: 20,
+            subject: "alice".to_string(),
+            object: "dirt".to_string(),
+            verb: "add_item".to_string(),
+            time_ms: 1_800_000_000_013,
+            subject_extra: "uuid-alice".to_string(),
+            data: inventory_delta_data(2, &[9, 9, 9]),
+        },
+    ];
+    for row in rows {
+        let version = db.current_version();
+        db.insert_with_version(row, version)
+            .expect("insert should succeed");
+    }
+
+    db.flush().expect("flush should succeed");
+
+    let base_query = Query {
+        x: Some(IntPredicate {
+            eq: Some(20),
+            ..IntPredicate::default()
+        }),
+        y: Some(IntPredicate {
+            eq: Some(70),
+            ..IntPredicate::default()
+        }),
+        z: Some(IntPredicate {
+            eq: Some(20),
+            ..IntPredicate::default()
+        }),
+        subject: Some("alice".to_string()),
+        object: Some("dirt".to_string()),
+        ..Query::default()
+    };
+    let remove_query = Query {
+        verb: Some("remove_item".to_string()),
+        ..base_query.clone()
+    };
+    let add_query = Query {
+        verb: Some("add_item".to_string()),
+        ..base_query
+    };
+
+    let remove_rows = db
+        .query(&remove_query, None)
+        .expect("query remove should succeed");
+    let add_rows = db
+        .query(&add_query, None)
+        .expect("query add should succeed");
+    assert_eq!(
+        remove_rows.len(),
+        1,
+        "non-item operation should break flush merge sequence for remove_item"
+    );
+    assert_eq!(
+        add_rows.len(),
+        1,
+        "non-item operation should break flush merge sequence for add_item"
     );
 
     let fail = db

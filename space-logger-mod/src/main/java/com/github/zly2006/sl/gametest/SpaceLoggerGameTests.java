@@ -272,6 +272,156 @@ public class SpaceLoggerGameTests {
         });
     }
 
+    @GameTest
+    public void flushMergesContinuousRemoveThenAdd(GameTestHelper helper) {
+        long startTimeMs = System.currentTimeMillis();
+        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        player.setGameMode(GameType.SURVIVAL);
+
+        BlockPos absPos = helper.absolutePos(new BlockPos(6, 1, 6));
+        ItemStack sample = new ItemStack(Items.DIRT, 4);
+        String subject = NativeSpaceLoggerBridge.subject(player);
+        String subjectExtra = NativeSpaceLoggerBridge.subjectExtra(player);
+        String object = NativeSpaceLoggerBridge.itemId(sample);
+
+        SpaceLogger.bridge().appendNow(
+            absPos.getX(),
+            absPos.getY(),
+            absPos.getZ(),
+            subject,
+            "remove_item",
+            object,
+            subjectExtra,
+            NativeSpaceLoggerBridge.encodeInventoryDeltaData(sample, -4, player.registryAccess())
+        );
+        SpaceLogger.bridge().appendNow(
+            absPos.getX(),
+            absPos.getY(),
+            absPos.getZ(),
+            subject,
+            "add_item",
+            object,
+            subjectExtra,
+            NativeSpaceLoggerBridge.encodeInventoryDeltaData(sample, 4, player.registryAccess())
+        );
+        SpaceLogger.bridge().flush();
+
+        helper.runAfterDelay(2, () -> {
+            int removeCount = SpaceLogger.bridge().queryRows(
+                subject,
+                object,
+                "remove_item",
+                absPos.getX(),
+                absPos.getX(),
+                absPos.getY(),
+                absPos.getY(),
+                absPos.getZ(),
+                absPos.getZ(),
+                startTimeMs,
+                Long.MAX_VALUE,
+                32
+            ).size();
+            int addCount = SpaceLogger.bridge().queryRows(
+                subject,
+                object,
+                "add_item",
+                absPos.getX(),
+                absPos.getX(),
+                absPos.getY(),
+                absPos.getY(),
+                absPos.getZ(),
+                absPos.getZ(),
+                startTimeMs,
+                Long.MAX_VALUE,
+                32
+            ).size();
+
+            helper.assertTrue(removeCount == 0, "expected remove_item rows to be merged away on flush");
+            helper.assertTrue(addCount == 0, "expected add_item rows to be merged away on flush");
+            helper.succeed();
+        });
+    }
+
+    @GameTest
+    public void flushDoesNotMergeAcrossUseBarrier(GameTestHelper helper) {
+        long startTimeMs = System.currentTimeMillis();
+        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        player.setGameMode(GameType.SURVIVAL);
+
+        BlockPos absPos = helper.absolutePos(new BlockPos(7, 1, 7));
+        ItemStack sample = new ItemStack(Items.DIRT, 2);
+        String subject = NativeSpaceLoggerBridge.subject(player);
+        String subjectExtra = NativeSpaceLoggerBridge.subjectExtra(player);
+        String object = NativeSpaceLoggerBridge.itemId(sample);
+
+        SpaceLogger.bridge().appendNow(
+            absPos.getX(),
+            absPos.getY(),
+            absPos.getZ(),
+            subject,
+            "remove_item",
+            object,
+            subjectExtra,
+            NativeSpaceLoggerBridge.encodeInventoryDeltaData(sample, -2, player.registryAccess())
+        );
+        SpaceLogger.bridge().appendNow(
+            absPos.getX(),
+            absPos.getY(),
+            absPos.getZ(),
+            subject,
+            "use",
+            "stone",
+            subjectExtra,
+            new byte[0]
+        );
+        SpaceLogger.bridge().appendNow(
+            absPos.getX(),
+            absPos.getY(),
+            absPos.getZ(),
+            subject,
+            "add_item",
+            object,
+            subjectExtra,
+            NativeSpaceLoggerBridge.encodeInventoryDeltaData(sample, 2, player.registryAccess())
+        );
+        SpaceLogger.bridge().flush();
+
+        helper.runAfterDelay(2, () -> {
+            int removeCount = SpaceLogger.bridge().queryRows(
+                subject,
+                object,
+                "remove_item",
+                absPos.getX(),
+                absPos.getX(),
+                absPos.getY(),
+                absPos.getY(),
+                absPos.getZ(),
+                absPos.getZ(),
+                startTimeMs,
+                Long.MAX_VALUE,
+                32
+            ).size();
+            int addCount = SpaceLogger.bridge().queryRows(
+                subject,
+                object,
+                "add_item",
+                absPos.getX(),
+                absPos.getX(),
+                absPos.getY(),
+                absPos.getY(),
+                absPos.getZ(),
+                absPos.getZ(),
+                startTimeMs,
+                Long.MAX_VALUE,
+                32
+            ).size();
+
+            helper.assertTrue(removeCount == 1, "expected remove_item row to remain because use should break merge");
+            helper.assertTrue(addCount == 1, "expected add_item row to remain because use should break merge");
+            helper.succeed();
+        });
+    }
+
     private static int findMenuSlotIndex(AbstractContainerMenu menu, Player player, boolean playerInventory, int containerSlot) {
         for (int i = 0; i < menu.slots.size(); i++) {
             Slot slot = menu.slots.get(i);
