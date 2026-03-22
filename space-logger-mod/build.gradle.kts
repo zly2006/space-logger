@@ -1,5 +1,6 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+import org.gradle.api.GradleException
 
 plugins {
     kotlin("jvm") version "2.3.10"
@@ -52,7 +53,53 @@ dependencies {
     implementation("net.fabricmc.fabric-api:fabric-api:${project.property("fabric_version")}")
 }
 
+val nativeProfile = providers.gradleProperty("spaceLoggerNativeProfile")
+    .map { profile -> if (profile.equals("release", ignoreCase = true)) "release" else "debug" }
+    .orElse("debug")
+val cargoExecutable = run {
+    val fromEnv = System.getenv("CARGO")?.takeIf { it.isNotBlank() }
+        ?: System.getenv("CARGO_BIN")?.takeIf { it.isNotBlank() }
+    if (fromEnv != null) {
+        fromEnv
+    } else {
+        val home = System.getenv("HOME")
+        val cargoFromHome = if (home.isNullOrBlank()) null else file("$home/.cargo/bin/cargo")
+        if (cargoFromHome != null && cargoFromHome.exists()) cargoFromHome.absolutePath else "cargo"
+    }
+}
+val nativeLibName = System.mapLibraryName("space_logger_native")
+val nativeLibPath = nativeProfile.map { profile ->
+    file("native-logger/target/$profile/$nativeLibName")
+}
+val cargoBuildNative by tasks.registering(Exec::class) {
+    group = "build"
+    description = "Build Rust JNI library for space-logger-mod."
+    workingDir = file("native-logger")
+    val profile = nativeProfile.get()
+    val args = mutableListOf("build")
+    if (profile == "release") {
+        args.add("--release")
+    }
+    commandLine(cargoExecutable, *args.toTypedArray())
+    val home = System.getenv("HOME")
+    if (!home.isNullOrBlank()) {
+        val currentPath = System.getenv("PATH") ?: ""
+        environment("PATH", "$home/.cargo/bin:$currentPath")
+    }
+
+    inputs.files(
+        file("native-logger/Cargo.toml"),
+        file("native-logger/Cargo.lock"),
+        file("../Cargo.toml"),
+        file("../Cargo.lock"),
+    )
+    inputs.dir(file("native-logger/src"))
+    inputs.dir(file("../src"))
+    outputs.upToDateWhen { false }
+}
+
 tasks.processResources {
+    dependsOn(cargoBuildNative)
     inputs.property("version", project.version)
     inputs.property("minecraft_version", project.property("minecraft_version"))
     inputs.property("loader_version", project.property("loader_version"))
@@ -66,6 +113,7 @@ tasks.processResources {
 }
 
 tasks.withType<JavaCompile>().configureEach {
+    dependsOn(cargoBuildNative)
     // ensure that the encoding is set to UTF-8, no matter what the system default is
     // this fixes some edge cases with special characters not displaying correctly
     // see http://yodaconditions.net/blog/fix-for-java-file-encoding-problems-with-gradle.html
@@ -75,7 +123,21 @@ tasks.withType<JavaCompile>().configureEach {
 }
 
 tasks.withType<KotlinCompile>().configureEach {
+    dependsOn(cargoBuildNative)
     compilerOptions.jvmTarget.set(JvmTarget.fromTarget(targetJavaVersion.toString()))
+}
+
+tasks.withType<JavaExec>().configureEach {
+    dependsOn(cargoBuildNative)
+    doFirst {
+        val nativeLib = nativeLibPath.get().absoluteFile
+        if (!nativeLib.exists()) {
+            throw GradleException(
+                "Native library not found after cargo build: ${nativeLib.absolutePath}"
+            )
+        }
+        systemProperty("space_logger_native_lib", nativeLib.absolutePath)
+    }
 }
 
 tasks.jar {

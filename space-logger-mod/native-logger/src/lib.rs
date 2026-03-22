@@ -1,21 +1,18 @@
 use std::fs;
 use std::path::PathBuf;
 use std::ptr;
-use std::sync::Mutex;
+use std::sync::RwLock;
 
 use jni::JNIEnv;
 use jni::objects::{JByteArray, JClass, JObject, JObjectArray, JString, JValue};
 use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jint, jlong, jobjectArray};
-use once_cell::sync::Lazy;
 use space_logger::{DbError, DbOptions, IntPredicate, LongPredicate, Query, Row, SpaceLoggerDb};
 
-#[derive(Default)]
-struct NativeState {
-    db: Option<SpaceLoggerDb>,
-    db_dir: Option<PathBuf>,
+struct NativeDbHandle {
+    db: RwLock<Option<SpaceLoggerDb>>,
+    db_dir: PathBuf,
+    memtable_flush_rows: usize,
 }
-
-static STATE: Lazy<Mutex<NativeState>> = Lazy::new(|| Mutex::new(NativeState::default()));
 
 fn throw_runtime(env: &mut JNIEnv, message: impl AsRef<str>) {
     let _ = env.throw_new("java/lang/RuntimeException", message.as_ref());
@@ -27,14 +24,35 @@ fn jstring_to_string(env: &mut JNIEnv, value: JString) -> Result<String, String>
         .map_err(|e| format!("invalid java string: {e}"))
 }
 
-fn open_db(path: &str, flush_rows: usize) -> Result<SpaceLoggerDb, String> {
+fn flush_rows_from_jint(memtable_flush_rows: jint) -> usize {
+    if memtable_flush_rows <= 0 {
+        4096usize
+    } else {
+        memtable_flush_rows as usize
+    }
+}
+
+fn open_db(path: &PathBuf, flush_rows: usize) -> Result<SpaceLoggerDb, String> {
     SpaceLoggerDb::open(
         path,
         DbOptions {
             memtable_flush_rows: flush_rows,
+            ..DbOptions::default()
         },
     )
-    .map_err(|e| format!("open db failed: {e}"))
+    .map_err(|e| format!("open db failed ({}): {e}", path.display()))
+}
+
+fn handle_from_ptr<'a>(native_ptr: jlong) -> Result<&'a NativeDbHandle, String> {
+    if native_ptr == 0 {
+        return Err("native bridge pointer is null (bridge already closed?)".to_string());
+    }
+    let raw = native_ptr as *const NativeDbHandle;
+    // SAFETY: pointer originates from Box::into_raw in nativeCreate, and Java passes it back unchanged.
+    unsafe {
+        raw.as_ref()
+            .ok_or_else(|| "invalid native bridge pointer".to_string())
+    }
 }
 
 fn non_empty(value: String) -> Option<String> {
@@ -104,50 +122,61 @@ fn to_java_query_row_array(env: &mut JNIEnv, rows: &[Row]) -> Result<jobjectArra
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeInit(
+pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeCreate(
     mut env: JNIEnv,
     _class: JClass,
     db_dir: JString,
     memtable_flush_rows: jint,
-) {
+) -> jlong {
     let db_dir = match jstring_to_string(&mut env, db_dir) {
         Ok(v) => v,
         Err(e) => {
             throw_runtime(&mut env, e);
-            return;
+            return 0;
         }
     };
 
-    let flush_rows = if memtable_flush_rows <= 0 {
-        4096usize
-    } else {
-        memtable_flush_rows as usize
-    };
-
-    let db = match open_db(&db_dir, flush_rows) {
+    let flush_rows = flush_rows_from_jint(memtable_flush_rows);
+    let db_dir_path = PathBuf::from(db_dir);
+    let db = match open_db(&db_dir_path, flush_rows) {
         Ok(db) => db,
         Err(e) => {
             throw_runtime(&mut env, e);
-            return;
+            return 0;
         }
     };
 
-    let mut state = match STATE.lock() {
-        Ok(lock) => lock,
-        Err(_) => {
-            throw_runtime(&mut env, "native state lock poisoned");
-            return;
-        }
+    let handle = NativeDbHandle {
+        db: RwLock::new(Some(db)),
+        db_dir: db_dir_path,
+        memtable_flush_rows: flush_rows,
     };
 
-    state.db = Some(db);
-    state.db_dir = Some(PathBuf::from(db_dir));
+    Box::into_raw(Box::new(handle)) as jlong
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeClose(
+    _env: JNIEnv,
+    _class: JClass,
+    native_ptr: jlong,
+) {
+    if native_ptr == 0 {
+        return;
+    }
+
+    let raw = native_ptr as *mut NativeDbHandle;
+    // SAFETY: pointer must come from Box::into_raw in nativeCreate and is consumed exactly once.
+    unsafe {
+        drop(Box::from_raw(raw));
+    }
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeAppend(
     mut env: JNIEnv,
     _class: JClass,
+    native_ptr: jlong,
     x: jint,
     y: jint,
     z: jint,
@@ -206,15 +235,22 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
         data,
     };
 
-    let state = match STATE.lock() {
-        Ok(lock) => lock,
-        Err(_) => {
-            throw_runtime(&mut env, "native state lock poisoned");
+    let native = match handle_from_ptr(native_ptr) {
+        Ok(handle) => handle,
+        Err(e) => {
+            throw_runtime(&mut env, e);
             return JNI_FALSE;
         }
     };
 
-    let Some(db) = state.db.as_ref() else {
+    let guard = match native.db.read() {
+        Ok(lock) => lock,
+        Err(_) => {
+            throw_runtime(&mut env, "native db lock poisoned");
+            return JNI_FALSE;
+        }
+    };
+    let Some(db) = guard.as_ref() else {
         throw_runtime(&mut env, "native db is not initialized");
         return JNI_FALSE;
     };
@@ -242,16 +278,24 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
 pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeCountAll(
     mut env: JNIEnv,
     _class: JClass,
+    native_ptr: jlong,
 ) -> jint {
-    let state = match STATE.lock() {
-        Ok(lock) => lock,
-        Err(_) => {
-            throw_runtime(&mut env, "native state lock poisoned");
+    let native = match handle_from_ptr(native_ptr) {
+        Ok(handle) => handle,
+        Err(e) => {
+            throw_runtime(&mut env, e);
             return 0;
         }
     };
 
-    let Some(db) = state.db.as_ref() else {
+    let guard = match native.db.read() {
+        Ok(lock) => lock,
+        Err(_) => {
+            throw_runtime(&mut env, "native db lock poisoned");
+            return 0;
+        }
+    };
+    let Some(db) = guard.as_ref() else {
         throw_runtime(&mut env, "native db is not initialized");
         return 0;
     };
@@ -269,6 +313,7 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
 pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeCountByVerb(
     mut env: JNIEnv,
     _class: JClass,
+    native_ptr: jlong,
     verb: JString,
 ) -> jint {
     let verb = match jstring_to_string(&mut env, verb) {
@@ -279,15 +324,22 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
         }
     };
 
-    let state = match STATE.lock() {
-        Ok(lock) => lock,
-        Err(_) => {
-            throw_runtime(&mut env, "native state lock poisoned");
+    let native = match handle_from_ptr(native_ptr) {
+        Ok(handle) => handle,
+        Err(e) => {
+            throw_runtime(&mut env, e);
             return 0;
         }
     };
 
-    let Some(db) = state.db.as_ref() else {
+    let guard = match native.db.read() {
+        Ok(lock) => lock,
+        Err(_) => {
+            throw_runtime(&mut env, "native db lock poisoned");
+            return 0;
+        }
+    };
+    let Some(db) = guard.as_ref() else {
         throw_runtime(&mut env, "native db is not initialized");
         return 0;
     };
@@ -310,6 +362,7 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
 pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeQuery(
     mut env: JNIEnv,
     _class: JClass,
+    native_ptr: jlong,
     subject: JString,
     object: JString,
     verb: JString,
@@ -383,15 +436,22 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
 
     let safe_limit = if limit <= 0 { 20usize } else { limit as usize };
 
-    let state = match STATE.lock() {
-        Ok(lock) => lock,
-        Err(_) => {
-            throw_runtime(&mut env, "native state lock poisoned");
+    let native = match handle_from_ptr(native_ptr) {
+        Ok(handle) => handle,
+        Err(e) => {
+            throw_runtime(&mut env, e);
             return ptr::null_mut();
         }
     };
 
-    let Some(db) = state.db.as_ref() else {
+    let guard = match native.db.read() {
+        Ok(lock) => lock,
+        Err(_) => {
+            throw_runtime(&mut env, "native db lock poisoned");
+            return ptr::null_mut();
+        }
+    };
+    let Some(db) = guard.as_ref() else {
         throw_runtime(&mut env, "native db is not initialized");
         return ptr::null_mut();
     };
@@ -403,7 +463,7 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
             return ptr::null_mut();
         }
     };
-    drop(state);
+    drop(guard);
 
     match to_java_query_row_array(&mut env, &rows) {
         Ok(array) => array,
@@ -418,43 +478,41 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
 pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeReset(
     mut env: JNIEnv,
     _class: JClass,
-    db_dir: JString,
-    memtable_flush_rows: jint,
+    native_ptr: jlong,
 ) {
-    let db_dir = match jstring_to_string(&mut env, db_dir) {
-        Ok(v) => v,
+    let native = match handle_from_ptr(native_ptr) {
+        Ok(handle) => handle,
         Err(e) => {
             throw_runtime(&mut env, e);
             return;
         }
     };
-    let flush_rows = if memtable_flush_rows <= 0 {
-        4096usize
-    } else {
-        memtable_flush_rows as usize
-    };
+
+    let db_dir = native.db_dir.clone();
+    let flush_rows = native.memtable_flush_rows;
 
     {
-        let mut state = match STATE.lock() {
+        let mut guard = match native.db.write() {
             Ok(lock) => lock,
             Err(_) => {
-                throw_runtime(&mut env, "native state lock poisoned");
+                throw_runtime(&mut env, "native db lock poisoned");
                 return;
             }
         };
-        state.db = None;
-        state.db_dir = None;
+        *guard = None;
     }
 
-    let db_dir_path = PathBuf::from(&db_dir);
-    if db_dir_path.exists() {
-        if let Err(e) = fs::remove_dir_all(&db_dir_path) {
-            throw_runtime(&mut env, format!("failed to remove db dir: {e}"));
+    if db_dir.exists() {
+        if let Err(e) = fs::remove_dir_all(&db_dir) {
+            throw_runtime(
+                &mut env,
+                format!("failed to remove db dir {}: {e}", db_dir.display()),
+            );
             return;
         }
     }
 
-    let db = match open_db(&db_dir, flush_rows) {
+    let reopened = match open_db(&db_dir, flush_rows) {
         Ok(db) => db,
         Err(e) => {
             throw_runtime(&mut env, e);
@@ -462,13 +520,12 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
         }
     };
 
-    let mut state = match STATE.lock() {
+    let mut guard = match native.db.write() {
         Ok(lock) => lock,
         Err(_) => {
-            throw_runtime(&mut env, "native state lock poisoned");
+            throw_runtime(&mut env, "native db lock poisoned");
             return;
         }
     };
-    state.db = Some(db);
-    state.db_dir = Some(db_dir_path);
+    *guard = Some(reopened);
 }

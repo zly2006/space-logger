@@ -1,5 +1,6 @@
 package com.github.zly2006.sl.command;
 
+import com.github.zly2006.sl.SpaceLogger;
 import com.github.zly2006.sl.jni.NativeSpaceLoggerBridge;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
@@ -89,7 +90,7 @@ public final class SpaceLoggerCommand {
         }
 
         ParsedFilters filters = parseFilters(filterText, player);
-        List<NativeSpaceLoggerBridge.QueryRow> rows = NativeSpaceLoggerBridge.queryRows(
+        List<NativeSpaceLoggerBridge.QueryRow> rows = SpaceLogger.bridge().queryRows(
             filters.subject,
             filters.object,
             filters.verb,
@@ -105,9 +106,8 @@ public final class SpaceLoggerCommand {
         );
         long nowMs = System.currentTimeMillis();
 
-        source.sendSystemMessage(Component.literal("[space-logger] matched_rows=" + rows.size()));
         if (rows.isEmpty()) {
-            source.sendSystemMessage(Component.literal("[space-logger] no rows matched this query"));
+            source.sendSystemMessage(Component.literal("[space-logger] 找不到记录"));
             return 1;
         }
 

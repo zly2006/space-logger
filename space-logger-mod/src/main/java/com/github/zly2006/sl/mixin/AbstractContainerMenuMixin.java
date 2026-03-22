@@ -1,5 +1,6 @@
 package com.github.zly2006.sl.mixin;
 
+import com.github.zly2006.sl.SpaceLogger;
 import com.github.zly2006.sl.jni.NativeSpaceLoggerBridge;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.NonNullList;
@@ -151,7 +152,7 @@ public abstract class AbstractContainerMenuMixin {
             return;
         }
 
-        NativeSpaceLoggerBridge.appendNow(
+        SpaceLogger.bridge().appendNow(
             pos.getX(),
             pos.getY(),
             pos.getZ(),

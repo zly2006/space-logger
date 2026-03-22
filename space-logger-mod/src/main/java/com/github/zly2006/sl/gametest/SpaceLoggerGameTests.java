@@ -1,5 +1,6 @@
 package com.github.zly2006.sl.gametest;
 
+import com.github.zly2006.sl.SpaceLogger;
 import com.github.zly2006.sl.jni.NativeSpaceLoggerBridge;
 import net.fabricmc.fabric.api.gametest.v1.GameTest;
 import net.minecraft.core.BlockPos;
@@ -24,9 +25,9 @@ import net.minecraft.world.entity.monster.zombie.Zombie;
 public class SpaceLoggerGameTests {
     @GameTest
     public void recordsHurtAndKill(GameTestHelper helper) {
-        int hurtBefore = NativeSpaceLoggerBridge.countByVerb("hurt");
-        int killBefore = NativeSpaceLoggerBridge.countByVerb("kill");
-        int noMatchBefore = NativeSpaceLoggerBridge.countByVerb("verb_does_not_exist");
+        int hurtBefore = SpaceLogger.bridge().countByVerb("hurt");
+        int killBefore = SpaceLogger.bridge().countByVerb("kill");
+        int noMatchBefore = SpaceLogger.bridge().countByVerb("verb_does_not_exist");
 
         ServerPlayer player = helper.makeMockServerPlayerInLevel();
         player.setGameMode(GameType.SURVIVAL);
@@ -35,9 +36,9 @@ public class SpaceLoggerGameTests {
         helper.hurt(zombie, player.damageSources().playerAttack(player), 100.0F);
 
         helper.runAfterDelay(2, () -> {
-            int hurtCount = NativeSpaceLoggerBridge.countByVerb("hurt");
-            int killCount = NativeSpaceLoggerBridge.countByVerb("kill");
-            int noMatchCount = NativeSpaceLoggerBridge.countByVerb("verb_does_not_exist");
+            int hurtCount = SpaceLogger.bridge().countByVerb("hurt");
+            int killCount = SpaceLogger.bridge().countByVerb("kill");
+            int noMatchCount = SpaceLogger.bridge().countByVerb("verb_does_not_exist");
 
             helper.assertTrue(hurtCount == hurtBefore + 1, "expected hurt count to increase by exactly 1");
             helper.assertTrue(killCount == killBefore + 1, "expected kill count to increase by exactly 1");
@@ -48,9 +49,9 @@ public class SpaceLoggerGameTests {
 
     @GameTest
     public void recordsBreakPlaceUse(GameTestHelper helper) {
-        int placeBefore = NativeSpaceLoggerBridge.countByVerb("place");
-        int breakBefore = NativeSpaceLoggerBridge.countByVerb("break");
-        int noMatchBefore = NativeSpaceLoggerBridge.countByVerb("verb_does_not_exist");
+        int placeBefore = SpaceLogger.bridge().countByVerb("place");
+        int breakBefore = SpaceLogger.bridge().countByVerb("break");
+        int noMatchBefore = SpaceLogger.bridge().countByVerb("verb_does_not_exist");
         long startTimeMs = System.currentTimeMillis();
 
         ServerPlayer player = helper.makeMockServerPlayerInLevel();
@@ -103,10 +104,10 @@ public class SpaceLoggerGameTests {
         helper.assertTrue(useResult.consumesAction(), "expected useItemOn to consume action");
 
         helper.runAfterDelay(2, () -> {
-            int placeCount = NativeSpaceLoggerBridge.countByVerb("place");
-            int breakCount = NativeSpaceLoggerBridge.countByVerb("break");
-            int noMatchCount = NativeSpaceLoggerBridge.countByVerb("verb_does_not_exist");
-            int useAtPlacePos = NativeSpaceLoggerBridge.queryRows(
+            int placeCount = SpaceLogger.bridge().countByVerb("place");
+            int breakCount = SpaceLogger.bridge().countByVerb("break");
+            int noMatchCount = SpaceLogger.bridge().countByVerb("verb_does_not_exist");
+            int useAtPlacePos = SpaceLogger.bridge().queryRows(
                 "",
                 "",
                 "use",
@@ -120,7 +121,7 @@ public class SpaceLoggerGameTests {
                 Long.MAX_VALUE,
                 32
             ).size();
-            int useAtUsePos = NativeSpaceLoggerBridge.queryRows(
+            int useAtUsePos = SpaceLogger.bridge().queryRows(
                 "",
                 "",
                 "use",
@@ -152,7 +153,7 @@ public class SpaceLoggerGameTests {
 
     @GameTest
     public void recordsAddAndRemoveItem(GameTestHelper helper) {
-        int noMatchBefore = NativeSpaceLoggerBridge.countByVerb("verb_does_not_exist");
+        int noMatchBefore = SpaceLogger.bridge().countByVerb("verb_does_not_exist");
         long startTimeMs = System.currentTimeMillis();
 
         ServerPlayer player = helper.makeMockServerPlayerInLevel();
@@ -212,7 +213,7 @@ public class SpaceLoggerGameTests {
         );
 
         helper.runAfterDelay(2, () -> {
-            var addRows = NativeSpaceLoggerBridge.queryRows(
+            var addRows = SpaceLogger.bridge().queryRows(
                 "",
                 "",
                 "add_item",
@@ -226,7 +227,7 @@ public class SpaceLoggerGameTests {
                 Long.MAX_VALUE,
                 32
             );
-            var removeRows = NativeSpaceLoggerBridge.queryRows(
+            var removeRows = SpaceLogger.bridge().queryRows(
                 "",
                 "",
                 "remove_item",
@@ -242,9 +243,9 @@ public class SpaceLoggerGameTests {
             );
             int addCount = addRows.size();
             int removeCount = removeRows.size();
-            int noMatchCount = NativeSpaceLoggerBridge.countByVerb("verb_does_not_exist");
-            int addGlobal = NativeSpaceLoggerBridge.countByVerb("add_item");
-            int removeGlobal = NativeSpaceLoggerBridge.countByVerb("remove_item");
+            int noMatchCount = SpaceLogger.bridge().countByVerb("verb_does_not_exist");
+            int addGlobal = SpaceLogger.bridge().countByVerb("add_item");
+            int removeGlobal = SpaceLogger.bridge().countByVerb("remove_item");
 
             helper.assertTrue(
                 addCount == 1,

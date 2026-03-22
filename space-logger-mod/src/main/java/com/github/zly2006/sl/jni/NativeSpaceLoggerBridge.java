@@ -14,8 +14,8 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtIo;
@@ -32,9 +32,9 @@ import net.minecraft.world.level.storage.TagValueOutput;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public final class NativeSpaceLoggerBridge {
+public final class NativeSpaceLoggerBridge implements AutoCloseable {
     private static final Logger LOGGER = LoggerFactory.getLogger("space-logger-mod/NativeBridge");
-    private static final Object LOCK = new Object();
+    private static final Object LIB_LOCK = new Object();
     private static final int DEFAULT_FLUSH_ROWS = 4096;
     private static final byte[] INVENTORY_DATA_MAGIC = new byte[] {'S', 'L', 'I', '1'};
     private static final int INVENTORY_DATA_HEADER_BYTES = 12;
@@ -42,27 +42,55 @@ public final class NativeSpaceLoggerBridge {
     private static final Set<UUID> RECENT_PLACE_PLAYERS = ConcurrentHashMap.newKeySet();
 
     private static volatile boolean loaded;
-    private static volatile boolean initialized;
-    private static Path dbDir;
 
-    private NativeSpaceLoggerBridge() {
+    private final Path dbDir;
+    private final int memtableFlushRows;
+    private long nativePtr;
+
+    private NativeSpaceLoggerBridge(Path dbDir, int memtableFlushRows, long nativePtr) {
+        this.dbDir = dbDir;
+        this.memtableFlushRows = memtableFlushRows;
+        this.nativePtr = nativePtr;
     }
 
-    public static void init(Path gameDir) {
-        synchronized (LOCK) {
-            if (!loaded) {
-                loadNativeLibrary(gameDir);
-                loaded = true;
-            }
-            if (!initialized) {
-                dbDir = gameDir.resolve("space-logger-db");
-                nativeInit(dbDir.toString(), DEFAULT_FLUSH_ROWS);
-                initialized = true;
-            }
+    public static NativeSpaceLoggerBridge open(Path gameDir, Path dbDir, int memtableFlushRows) {
+        ensureNativeLoaded(gameDir);
+        int flushRows = memtableFlushRows <= 0 ? DEFAULT_FLUSH_ROWS : memtableFlushRows;
+        long ptr = nativeCreate(dbDir.toAbsolutePath().toString(), flushRows);
+        if (ptr == 0L) {
+            throw new IllegalStateException("nativeCreate returned null pointer");
+        }
+        return new NativeSpaceLoggerBridge(dbDir.toAbsolutePath(), flushRows, ptr);
+    }
+
+    public Path dbDir() {
+        return this.dbDir;
+    }
+
+    public int memtableFlushRows() {
+        return this.memtableFlushRows;
+    }
+
+    public boolean isClosed() {
+        synchronized (this) {
+            return this.nativePtr == 0L;
         }
     }
 
-    public static void append(
+    @Override
+    public void close() {
+        long ptrToClose;
+        synchronized (this) {
+            ptrToClose = this.nativePtr;
+            if (ptrToClose == 0L) {
+                return;
+            }
+            this.nativePtr = 0L;
+        }
+        nativeClose(ptrToClose);
+    }
+
+    public void append(
         int x,
         int y,
         int z,
@@ -73,8 +101,9 @@ public final class NativeSpaceLoggerBridge {
         String subjectExtra,
         byte[] data
     ) {
-        ensureInitialized();
+        long ptr = requireNativePtr();
         boolean ok = nativeAppend(
+            ptr,
             x,
             y,
             z,
@@ -90,7 +119,7 @@ public final class NativeSpaceLoggerBridge {
         }
     }
 
-    public static void appendNow(
+    public void appendNow(
         int x,
         int y,
         int z,
@@ -101,6 +130,73 @@ public final class NativeSpaceLoggerBridge {
         byte[] data
     ) {
         append(x, y, z, subject, verb, object, System.currentTimeMillis(), subjectExtra, data);
+    }
+
+    public int countAll() {
+        return nativeCountAll(requireNativePtr());
+    }
+
+    public int countByVerb(String verb) {
+        return nativeCountByVerb(requireNativePtr(), safe(verb));
+    }
+
+    public List<QueryRow> queryRows(
+        String subject,
+        String object,
+        String verb,
+        int minX,
+        int maxX,
+        int minY,
+        int maxY,
+        int minZ,
+        int maxZ,
+        long afterTimeMs,
+        long beforeTimeMs,
+        int limit
+    ) {
+        int safeLimit = limit <= 0 ? 20 : limit;
+        QueryRow[] rows = nativeQuery(
+            requireNativePtr(),
+            safe(subject),
+            safe(object),
+            safe(verb),
+            minX,
+            maxX,
+            minY,
+            maxY,
+            minZ,
+            maxZ,
+            afterTimeMs,
+            beforeTimeMs,
+            safeLimit
+        );
+        if (rows == null || rows.length == 0) {
+            return Collections.emptyList();
+        }
+        return Arrays.asList(rows);
+    }
+
+    public void resetForTests() {
+        nativeReset(requireNativePtr());
+    }
+
+    private static void ensureNativeLoaded(Path gameDir) {
+        synchronized (LIB_LOCK) {
+            if (loaded) {
+                return;
+            }
+            loadNativeLibrary(gameDir);
+            loaded = true;
+        }
+    }
+
+    private long requireNativePtr() {
+        synchronized (this) {
+            if (this.nativePtr == 0L) {
+                throw new IllegalStateException("NativeSpaceLoggerBridge is closed");
+            }
+            return this.nativePtr;
+        }
     }
 
     public static String normalizeIdentifier(Identifier identifier) {
@@ -153,7 +249,7 @@ public final class NativeSpaceLoggerBridge {
             CompoundTag tag = output.buildResult();
 
             try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                DataOutputStream dos = new DataOutputStream(baos)) {
+                 DataOutputStream dos = new DataOutputStream(baos)) {
                 NbtIo.write(tag, dos);
                 dos.flush();
                 return baos.toByteArray();
@@ -225,66 +321,6 @@ public final class NativeSpaceLoggerBridge {
         return RECENT_PLACE_PLAYERS.remove(player.getUUID());
     }
 
-    public static int countAll() {
-        ensureInitialized();
-        return nativeCountAll();
-    }
-
-    public static int countByVerb(String verb) {
-        ensureInitialized();
-        return nativeCountByVerb(verb);
-    }
-
-    public static List<QueryRow> queryRows(
-        String subject,
-        String object,
-        String verb,
-        int minX,
-        int maxX,
-        int minY,
-        int maxY,
-        int minZ,
-        int maxZ,
-        long afterTimeMs,
-        long beforeTimeMs,
-        int limit
-    ) {
-        ensureInitialized();
-
-        int safeLimit = limit <= 0 ? 20 : limit;
-        QueryRow[] rows = nativeQuery(
-            safe(subject),
-            safe(object),
-            safe(verb),
-            minX,
-            maxX,
-            minY,
-            maxY,
-            minZ,
-            maxZ,
-            afterTimeMs,
-            beforeTimeMs,
-            safeLimit
-        );
-        if (rows == null || rows.length == 0) {
-            return Collections.emptyList();
-        }
-        return Arrays.asList(rows);
-    }
-
-    public static void resetForTests() {
-        synchronized (LOCK) {
-            ensureInitialized();
-            nativeReset(dbDir.toString(), DEFAULT_FLUSH_ROWS);
-        }
-    }
-
-    private static void ensureInitialized() {
-        if (!initialized) {
-            throw new IllegalStateException("NativeSpaceLoggerBridge is not initialized");
-        }
-    }
-
     private static void loadNativeLibrary(Path gameDir) {
         String explicit = System.getProperty("space_logger_native_lib");
         if (explicit != null && !explicit.isBlank()) {
@@ -326,9 +362,12 @@ public final class NativeSpaceLoggerBridge {
         return value == null ? "" : value;
     }
 
-    private static native void nativeInit(String dbDir, int memtableFlushRows);
+    private static native long nativeCreate(String dbDir, int memtableFlushRows);
+
+    private static native void nativeClose(long nativePtr);
 
     private static native boolean nativeAppend(
+        long nativePtr,
         int x,
         int y,
         int z,
@@ -340,11 +379,12 @@ public final class NativeSpaceLoggerBridge {
         byte[] data
     );
 
-    private static native int nativeCountAll();
+    private static native int nativeCountAll(long nativePtr);
 
-    private static native int nativeCountByVerb(String verb);
+    private static native int nativeCountByVerb(long nativePtr, String verb);
 
     private static native QueryRow[] nativeQuery(
+        long nativePtr,
         String subject,
         String object,
         String verb,
@@ -359,7 +399,7 @@ public final class NativeSpaceLoggerBridge {
         int limit
     );
 
-    private static native void nativeReset(String dbDir, int memtableFlushRows);
+    private static native void nativeReset(long nativePtr);
 
     public record QueryRow(
         long timeMs,

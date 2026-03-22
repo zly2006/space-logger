@@ -1,5 +1,6 @@
 package com.github.zly2006.sl.mixin;
 
+import com.github.zly2006.sl.SpaceLogger;
 import com.github.zly2006.sl.jni.NativeSpaceLoggerBridge;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
@@ -53,7 +54,7 @@ public abstract class LivingEntityMixin extends Entity  {
 
         LivingEntity target = (LivingEntity) (Object) this;
         BlockPos pos = target.blockPosition();
-        NativeSpaceLoggerBridge.appendNow(
+        SpaceLogger.bridge().appendNow(
             pos.getX(),
             pos.getY(),
             pos.getZ(),
@@ -85,7 +86,7 @@ public abstract class LivingEntityMixin extends Entity  {
 
         LivingEntity target = (LivingEntity) (Object) this;
         BlockPos pos = target.blockPosition();
-        NativeSpaceLoggerBridge.appendNow(
+        SpaceLogger.bridge().appendNow(
             pos.getX(),
             pos.getY(),
             pos.getZ(),

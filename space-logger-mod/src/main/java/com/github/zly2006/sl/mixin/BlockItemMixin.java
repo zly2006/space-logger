@@ -1,5 +1,6 @@
 package com.github.zly2006.sl.mixin;
 
+import com.github.zly2006.sl.SpaceLogger;
 import com.github.zly2006.sl.jni.NativeSpaceLoggerBridge;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.BlockPos;
@@ -29,7 +30,7 @@ public abstract class BlockItemMixin {
 
         BlockPos pos = context.getClickedPos();
         BlockItem self = (BlockItem) (Object) this;
-        NativeSpaceLoggerBridge.appendNow(
+        SpaceLogger.bridge().appendNow(
             pos.getX(),
             pos.getY(),
             pos.getZ(),
