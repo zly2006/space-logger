@@ -15,6 +15,14 @@ const SEGMENT_V2_MAGIC: [u8; 8] = *b"SLSEGv2\0";
 const SEGMENT_V2_HEADER_LEN: u64 = 36;
 const INVENTORY_DATA_MAGIC: [u8; 4] = *b"SLI1";
 const INVENTORY_DATA_HEADER_LEN: usize = 12;
+pub const VERB_HURT: u32 = 0;
+pub const VERB_KILL: u32 = 1;
+pub const VERB_BREAK: u32 = 2;
+pub const VERB_PLACE: u32 = 3;
+pub const VERB_USE: u32 = 4;
+pub const VERB_ADD_ITEM: u32 = 5;
+pub const VERB_REMOVE_ITEM: u32 = 6;
+pub const VERB_MASK_ALL: u32 = u32::MAX;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Row {
@@ -23,7 +31,7 @@ pub struct Row {
     pub z: i32,
     pub subject: String,
     pub object: String,
-    pub verb: String,
+    pub verb: u32,
     pub time_ms: i64,
     pub subject_extra: String,
     pub data: Vec<u8>,
@@ -125,15 +133,66 @@ impl LongPredicate {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Query {
     pub x: Option<IntPredicate>,
     pub y: Option<IntPredicate>,
     pub z: Option<IntPredicate>,
     pub subject: Option<String>,
     pub object: Option<String>,
-    pub verb: Option<String>,
+    pub verb_mask: u32,
     pub time_ms: Option<LongPredicate>,
+}
+
+impl Default for Query {
+    fn default() -> Self {
+        Self {
+            x: None,
+            y: None,
+            z: None,
+            subject: None,
+            object: None,
+            verb_mask: VERB_MASK_ALL,
+            time_ms: None,
+        }
+    }
+}
+
+pub fn verb_name(verb: u32) -> &'static str {
+    match verb {
+        VERB_HURT => "hurt",
+        VERB_KILL => "kill",
+        VERB_BREAK => "break",
+        VERB_PLACE => "place",
+        VERB_USE => "use",
+        VERB_ADD_ITEM => "add_item",
+        VERB_REMOVE_ITEM => "remove_item",
+        _ => "unknown",
+    }
+}
+
+pub fn verb_id_from_name(name: &str) -> Option<u32> {
+    match name {
+        "hurt" => Some(VERB_HURT),
+        "kill" => Some(VERB_KILL),
+        "break" => Some(VERB_BREAK),
+        "place" => Some(VERB_PLACE),
+        "use" => Some(VERB_USE),
+        "add_item" => Some(VERB_ADD_ITEM),
+        "remove_item" => Some(VERB_REMOVE_ITEM),
+        _ => None,
+    }
+}
+
+pub fn verb_mask_single(verb: u32) -> u32 {
+    if verb < 32 { 1u32 << verb } else { 0 }
+}
+
+fn verb_in_mask(verb: u32, mask: u32) -> bool {
+    if verb >= 32 {
+        return false;
+    }
+    (mask & (1u32 << verb)) != 0
 }
 
 #[derive(Clone, Debug)]
@@ -203,7 +262,7 @@ struct ColumnStore {
     z: Vec<i32>,
     subject: Vec<String>,
     object: Vec<String>,
-    verb: Vec<String>,
+    verb: Vec<u32>,
     time_ms: Vec<i64>,
     subject_extra: Vec<String>,
     data: Vec<Vec<u8>>,
@@ -225,7 +284,7 @@ impl ColumnStore {
         self.z.push(row.z);
         self.subject.push(row.subject.clone());
         self.object.push(row.object.clone());
-        self.verb.push(row.verb.clone());
+        self.verb.push(row.verb);
         self.time_ms.push(row.time_ms);
         self.subject_extra.push(row.subject_extra.clone());
         self.data.push(row.data.clone());
@@ -238,7 +297,7 @@ impl ColumnStore {
             z: self.z[row_id],
             subject: self.subject[row_id].clone(),
             object: self.object[row_id].clone(),
-            verb: self.verb[row_id].clone(),
+            verb: self.verb[row_id],
             time_ms: self.time_ms[row_id],
             subject_extra: self.subject_extra[row_id].clone(),
             data: self.data[row_id].clone(),
@@ -251,7 +310,7 @@ struct MemTable {
     columns: ColumnStore,
     subject_index: HashMap<String, Vec<usize>>,
     object_index: HashMap<String, Vec<usize>>,
-    verb_index: HashMap<String, Vec<usize>>,
+    verb_index: [Vec<usize>; 32],
 }
 
 impl MemTable {
@@ -265,10 +324,9 @@ impl MemTable {
             .entry(row.object.clone())
             .or_default()
             .push(row_id);
-        self.verb_index
-            .entry(row.verb.clone())
-            .or_default()
-            .push(row_id);
+        if row.verb < 32 {
+            self.verb_index[row.verb as usize].push(row_id);
+        }
         self.columns.push(seq, row);
     }
 
@@ -294,7 +352,7 @@ impl MemTable {
             return vec![];
         }
 
-        let mut candidate = initial_candidates_from_string_filters(
+        let mut candidate = initial_candidates_from_indexed_filters(
             self.columns.len(),
             query,
             &self.subject_index,
@@ -587,7 +645,7 @@ impl Segment {
         let mut candidate: Option<Vec<usize>> = None;
         let needs_index = query.subject.is_some()
             || query.object.is_some()
-            || query.verb.is_some()
+            || query.verb_mask != VERB_MASK_ALL
             || has_xyz_filter(query)
             || query
                 .time_ms
@@ -596,7 +654,7 @@ impl Segment {
 
         if needs_index {
             let index = self.ensure_index(&columns)?;
-            candidate = initial_candidates_from_string_filters(
+            candidate = initial_candidates_from_indexed_filters(
                 columns.len(),
                 query,
                 &index.subject_index,
@@ -741,7 +799,7 @@ impl Segment {
 struct SegmentIndex {
     subject_index: HashMap<String, Vec<usize>>,
     object_index: HashMap<String, Vec<usize>>,
-    verb_index: HashMap<String, Vec<usize>>,
+    verb_index: [Vec<usize>; 32],
     morton_sorted: Vec<(u128, usize)>,
     time_sorted: Vec<(i64, usize)>,
 }
@@ -750,7 +808,7 @@ impl SegmentIndex {
     fn build(columns: &ColumnStore) -> Self {
         let mut subject_index: HashMap<String, Vec<usize>> = HashMap::new();
         let mut object_index: HashMap<String, Vec<usize>> = HashMap::new();
-        let mut verb_index: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut verb_index: [Vec<usize>; 32] = std::array::from_fn(|_| Vec::new());
         let mut morton_sorted = Vec::with_capacity(columns.len());
         let mut time_sorted = Vec::with_capacity(columns.len());
 
@@ -763,10 +821,10 @@ impl SegmentIndex {
                 .entry(columns.object[row_id].clone())
                 .or_default()
                 .push(row_id);
-            verb_index
-                .entry(columns.verb[row_id].clone())
-                .or_default()
-                .push(row_id);
+            let verb = columns.verb[row_id];
+            if verb < 32 {
+                verb_index[verb as usize].push(row_id);
+            }
             let morton = morton_encode_i32(columns.x[row_id], columns.y[row_id], columns.z[row_id]);
             morton_sorted.push((morton, row_id));
             time_sorted.push((columns.time_ms[row_id], row_id));
@@ -1434,7 +1492,7 @@ fn enforce_same_location_kill_limit(columns: ColumnStore, limit: usize) -> Colum
     let mut per_location_object = HashMap::<(i32, i32, i32, String), usize>::new();
 
     for row_id in (0..columns.len()).rev() {
-        if columns.verb[row_id] != "kill" {
+        if columns.verb[row_id] != VERB_KILL {
             continue;
         }
         let key = (
@@ -1464,7 +1522,7 @@ fn enforce_same_location_kill_limit(columns: ColumnStore, limit: usize) -> Colum
             filtered.z.push(columns.z[row_id]);
             filtered.subject.push(columns.subject[row_id].clone());
             filtered.object.push(columns.object[row_id].clone());
-            filtered.verb.push(columns.verb[row_id].clone());
+            filtered.verb.push(columns.verb[row_id]);
             filtered.time_ms.push(columns.time_ms[row_id]);
             filtered
                 .subject_extra
@@ -1498,7 +1556,7 @@ fn consolidate_inventory_remove_add_on_flush(mut columns: ColumnStore) -> Column
 
     let mut run_start = 0usize;
     while run_start < row_count {
-        if !is_inventory_operation(columns.verb[run_start].as_str()) {
+        if !is_inventory_operation(columns.verb[run_start]) {
             run_start += 1;
             continue;
         }
@@ -1510,7 +1568,7 @@ fn consolidate_inventory_remove_add_on_flush(mut columns: ColumnStore) -> Column
         );
         let mut run_end = run_start + 1;
         while run_end < row_count {
-            if !is_inventory_operation(columns.verb[run_end].as_str()) {
+            if !is_inventory_operation(columns.verb[run_end]) {
                 break;
             }
 
@@ -1538,7 +1596,7 @@ fn consolidate_inventory_remove_add_on_flush(mut columns: ColumnStore) -> Column
             filtered.z.push(columns.z[row_id]);
             filtered.subject.push(columns.subject[row_id].clone());
             filtered.object.push(columns.object[row_id].clone());
-            filtered.verb.push(columns.verb[row_id].clone());
+            filtered.verb.push(columns.verb[row_id]);
             filtered.time_ms.push(columns.time_ms[row_id]);
             filtered
                 .subject_extra
@@ -1569,9 +1627,9 @@ fn consolidate_inventory_run(
             continue;
         };
 
-        let verb = columns.verb[row_id].as_str();
-        let is_remove = verb == "remove_item" && delta_info.quantity_delta < 0;
-        let is_add = verb == "add_item" && delta_info.quantity_delta > 0;
+        let verb = columns.verb[row_id];
+        let is_remove = verb == VERB_REMOVE_ITEM && delta_info.quantity_delta < 0;
+        let is_add = verb == VERB_ADD_ITEM && delta_info.quantity_delta > 0;
         if !is_remove && !is_add {
             current_key = None;
             pending_remove_row_ids.clear();
@@ -1640,8 +1698,8 @@ fn consolidate_inventory_run(
     }
 }
 
-fn is_inventory_operation(verb: &str) -> bool {
-    verb == "add_item" || verb == "remove_item"
+fn is_inventory_operation(verb: u32) -> bool {
+    verb == VERB_ADD_ITEM || verb == VERB_REMOVE_ITEM
 }
 
 fn parse_inventory_delta_info(data: &[u8]) -> Option<InventoryDeltaInfo> {
@@ -1882,12 +1940,12 @@ fn remove_segment_family(segment_path: &Path) -> Result<(), DbError> {
     Ok(())
 }
 
-fn initial_candidates_from_string_filters(
+fn initial_candidates_from_indexed_filters(
     row_count: usize,
     query: &Query,
     subject_index: &HashMap<String, Vec<usize>>,
     object_index: &HashMap<String, Vec<usize>>,
-    verb_index: &HashMap<String, Vec<usize>>,
+    verb_index: &[Vec<usize>; 32],
 ) -> Option<Vec<usize>> {
     let mut candidate: Option<Vec<usize>> = None;
 
@@ -1907,8 +1965,15 @@ fn initial_candidates_from_string_filters(
         ));
     }
 
-    if let Some(verb) = query.verb.as_ref() {
-        let ids = verb_index.get(verb).cloned().unwrap_or_default();
+    if query.verb_mask != VERB_MASK_ALL {
+        let mut ids = Vec::new();
+        for bit in 0..32 {
+            if (query.verb_mask & (1u32 << bit)) != 0 {
+                ids.extend_from_slice(&verb_index[bit as usize]);
+            }
+        }
+        ids.sort_unstable();
+        ids.dedup();
         candidate = Some(intersect_sorted_vecs(
             candidate.unwrap_or_else(|| (0..row_count).collect()),
             ids,
@@ -1954,10 +2019,7 @@ fn row_id_matches_query(columns: &ColumnStore, row_id: usize, query: &Query) -> 
             .object
             .as_ref()
             .is_none_or(|object| columns.object[row_id] == *object)
-        && query
-            .verb
-            .as_ref()
-            .is_none_or(|verb| columns.verb[row_id] == *verb)
+        && verb_in_mask(columns.verb[row_id], query.verb_mask)
 }
 
 fn row_matches_query(row: &Row, query: &Query) -> bool {
@@ -1973,7 +2035,7 @@ fn row_matches_query(row: &Row, query: &Query) -> bool {
             .object
             .as_ref()
             .is_none_or(|object| row.object == *object)
-        && query.verb.as_ref().is_none_or(|verb| row.verb == *verb)
+        && verb_in_mask(row.verb, query.verb_mask)
 }
 
 fn matches_int(value: i32, predicate: Option<&IntPredicate>) -> bool {

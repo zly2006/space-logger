@@ -59,7 +59,7 @@ public abstract class LivingEntityMixin extends Entity  {
             pos.getY(),
             pos.getZ(),
             NativeSpaceLoggerBridge.subject(serverPlayer),
-            "hurt",
+            NativeSpaceLoggerBridge.VERB_HURT,
             NativeSpaceLoggerBridge.entityId(target),
             NativeSpaceLoggerBridge.subjectExtra(serverPlayer),
             NativeSpaceLoggerBridge.encodeHurtData(this.getUUID(), dealt)
@@ -91,7 +91,7 @@ public abstract class LivingEntityMixin extends Entity  {
             pos.getY(),
             pos.getZ(),
             NativeSpaceLoggerBridge.subject(killer),
-            "kill",
+            NativeSpaceLoggerBridge.VERB_KILL,
             NativeSpaceLoggerBridge.entityId(target),
             NativeSpaceLoggerBridge.subjectExtra(killer),
             NativeSpaceLoggerBridge.encodeEntityNbt(target)

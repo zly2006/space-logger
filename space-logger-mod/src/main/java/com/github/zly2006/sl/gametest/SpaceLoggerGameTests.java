@@ -23,11 +23,15 @@ import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.entity.monster.zombie.Zombie;
 
 public class SpaceLoggerGameTests {
+    private static int mask(int verbId) {
+        return NativeSpaceLoggerBridge.verbMaskSingle(verbId);
+    }
+
     @GameTest
     public void recordsHurtAndKill(GameTestHelper helper) {
-        int hurtBefore = SpaceLogger.bridge().countByVerb("hurt");
-        int killBefore = SpaceLogger.bridge().countByVerb("kill");
-        int noMatchBefore = SpaceLogger.bridge().countByVerb("verb_does_not_exist");
+        int hurtBefore = SpaceLogger.bridge().countByVerb(NativeSpaceLoggerBridge.VERB_HURT);
+        int killBefore = SpaceLogger.bridge().countByVerb(NativeSpaceLoggerBridge.VERB_KILL);
+        int noMatchBefore = SpaceLogger.bridge().countByVerb(-1);
 
         ServerPlayer player = helper.makeMockServerPlayerInLevel();
         player.setGameMode(GameType.SURVIVAL);
@@ -36,9 +40,9 @@ public class SpaceLoggerGameTests {
         helper.hurt(zombie, player.damageSources().playerAttack(player), 100.0F);
 
         helper.runAfterDelay(2, () -> {
-            int hurtCount = SpaceLogger.bridge().countByVerb("hurt");
-            int killCount = SpaceLogger.bridge().countByVerb("kill");
-            int noMatchCount = SpaceLogger.bridge().countByVerb("verb_does_not_exist");
+            int hurtCount = SpaceLogger.bridge().countByVerb(NativeSpaceLoggerBridge.VERB_HURT);
+            int killCount = SpaceLogger.bridge().countByVerb(NativeSpaceLoggerBridge.VERB_KILL);
+            int noMatchCount = SpaceLogger.bridge().countByVerb(-1);
 
             helper.assertTrue(hurtCount == hurtBefore + 1, "expected hurt count to increase by exactly 1");
             helper.assertTrue(killCount == killBefore + 1, "expected kill count to increase by exactly 1");
@@ -49,9 +53,9 @@ public class SpaceLoggerGameTests {
 
     @GameTest
     public void recordsBreakPlaceUse(GameTestHelper helper) {
-        int placeBefore = SpaceLogger.bridge().countByVerb("place");
-        int breakBefore = SpaceLogger.bridge().countByVerb("break");
-        int noMatchBefore = SpaceLogger.bridge().countByVerb("verb_does_not_exist");
+        int placeBefore = SpaceLogger.bridge().countByVerb(NativeSpaceLoggerBridge.VERB_PLACE);
+        int breakBefore = SpaceLogger.bridge().countByVerb(NativeSpaceLoggerBridge.VERB_BREAK);
+        int noMatchBefore = SpaceLogger.bridge().countByVerb(-1);
         long startTimeMs = System.currentTimeMillis();
 
         ServerPlayer player = helper.makeMockServerPlayerInLevel();
@@ -104,13 +108,13 @@ public class SpaceLoggerGameTests {
         helper.assertTrue(useResult.consumesAction(), "expected useItemOn to consume action");
 
         helper.runAfterDelay(2, () -> {
-            int placeCount = SpaceLogger.bridge().countByVerb("place");
-            int breakCount = SpaceLogger.bridge().countByVerb("break");
-            int noMatchCount = SpaceLogger.bridge().countByVerb("verb_does_not_exist");
+            int placeCount = SpaceLogger.bridge().countByVerb(NativeSpaceLoggerBridge.VERB_PLACE);
+            int breakCount = SpaceLogger.bridge().countByVerb(NativeSpaceLoggerBridge.VERB_BREAK);
+            int noMatchCount = SpaceLogger.bridge().countByVerb(-1);
             int useAtPlacePos = SpaceLogger.bridge().queryRows(
                 "",
                 "",
-                "use",
+                mask(NativeSpaceLoggerBridge.VERB_USE),
                 absPlacePos.getX(),
                 absPlacePos.getX(),
                 absPlacePos.getY(),
@@ -124,7 +128,7 @@ public class SpaceLoggerGameTests {
             int useAtUsePos = SpaceLogger.bridge().queryRows(
                 "",
                 "",
-                "use",
+                mask(NativeSpaceLoggerBridge.VERB_USE),
                 absUsePos.getX(),
                 absUsePos.getX(),
                 absUsePos.getY(),
@@ -153,7 +157,7 @@ public class SpaceLoggerGameTests {
 
     @GameTest
     public void recordsAddAndRemoveItem(GameTestHelper helper) {
-        int noMatchBefore = SpaceLogger.bridge().countByVerb("verb_does_not_exist");
+        int noMatchBefore = SpaceLogger.bridge().countByVerb(-1);
         long startTimeMs = System.currentTimeMillis();
 
         ServerPlayer player = helper.makeMockServerPlayerInLevel();
@@ -216,7 +220,7 @@ public class SpaceLoggerGameTests {
             var addRows = SpaceLogger.bridge().queryRows(
                 "",
                 "",
-                "add_item",
+                mask(NativeSpaceLoggerBridge.VERB_ADD_ITEM),
                 absChestPos.getX(),
                 absChestPos.getX(),
                 absChestPos.getY(),
@@ -230,7 +234,7 @@ public class SpaceLoggerGameTests {
             var removeRows = SpaceLogger.bridge().queryRows(
                 "",
                 "",
-                "remove_item",
+                mask(NativeSpaceLoggerBridge.VERB_REMOVE_ITEM),
                 absChestPos.getX(),
                 absChestPos.getX(),
                 absChestPos.getY(),
@@ -243,9 +247,9 @@ public class SpaceLoggerGameTests {
             );
             int addCount = addRows.size();
             int removeCount = removeRows.size();
-            int noMatchCount = SpaceLogger.bridge().countByVerb("verb_does_not_exist");
-            int addGlobal = SpaceLogger.bridge().countByVerb("add_item");
-            int removeGlobal = SpaceLogger.bridge().countByVerb("remove_item");
+            int noMatchCount = SpaceLogger.bridge().countByVerb(-1);
+            int addGlobal = SpaceLogger.bridge().countByVerb(NativeSpaceLoggerBridge.VERB_ADD_ITEM);
+            int removeGlobal = SpaceLogger.bridge().countByVerb(NativeSpaceLoggerBridge.VERB_REMOVE_ITEM);
 
             helper.assertTrue(
                 addCount == 1,
@@ -289,7 +293,7 @@ public class SpaceLoggerGameTests {
             absPos.getY(),
             absPos.getZ(),
             subject,
-            "remove_item",
+            NativeSpaceLoggerBridge.VERB_REMOVE_ITEM,
             object,
             subjectExtra,
             NativeSpaceLoggerBridge.encodeInventoryDeltaData(sample, -4, player.registryAccess())
@@ -299,7 +303,7 @@ public class SpaceLoggerGameTests {
             absPos.getY(),
             absPos.getZ(),
             subject,
-            "add_item",
+            NativeSpaceLoggerBridge.VERB_ADD_ITEM,
             object,
             subjectExtra,
             NativeSpaceLoggerBridge.encodeInventoryDeltaData(sample, 4, player.registryAccess())
@@ -310,7 +314,7 @@ public class SpaceLoggerGameTests {
             int removeCount = SpaceLogger.bridge().queryRows(
                 subject,
                 object,
-                "remove_item",
+                mask(NativeSpaceLoggerBridge.VERB_REMOVE_ITEM),
                 absPos.getX(),
                 absPos.getX(),
                 absPos.getY(),
@@ -324,7 +328,7 @@ public class SpaceLoggerGameTests {
             int addCount = SpaceLogger.bridge().queryRows(
                 subject,
                 object,
-                "add_item",
+                mask(NativeSpaceLoggerBridge.VERB_ADD_ITEM),
                 absPos.getX(),
                 absPos.getX(),
                 absPos.getY(),
@@ -359,7 +363,7 @@ public class SpaceLoggerGameTests {
             absPos.getY(),
             absPos.getZ(),
             subject,
-            "remove_item",
+            NativeSpaceLoggerBridge.VERB_REMOVE_ITEM,
             object,
             subjectExtra,
             NativeSpaceLoggerBridge.encodeInventoryDeltaData(sample, -2, player.registryAccess())
@@ -369,7 +373,7 @@ public class SpaceLoggerGameTests {
             absPos.getY(),
             absPos.getZ(),
             subject,
-            "use",
+            NativeSpaceLoggerBridge.VERB_USE,
             "stone",
             subjectExtra,
             new byte[0]
@@ -379,7 +383,7 @@ public class SpaceLoggerGameTests {
             absPos.getY(),
             absPos.getZ(),
             subject,
-            "add_item",
+            NativeSpaceLoggerBridge.VERB_ADD_ITEM,
             object,
             subjectExtra,
             NativeSpaceLoggerBridge.encodeInventoryDeltaData(sample, 2, player.registryAccess())
@@ -390,7 +394,7 @@ public class SpaceLoggerGameTests {
             int removeCount = SpaceLogger.bridge().queryRows(
                 subject,
                 object,
-                "remove_item",
+                mask(NativeSpaceLoggerBridge.VERB_REMOVE_ITEM),
                 absPos.getX(),
                 absPos.getX(),
                 absPos.getY(),
@@ -404,7 +408,7 @@ public class SpaceLoggerGameTests {
             int addCount = SpaceLogger.bridge().queryRows(
                 subject,
                 object,
-                "add_item",
+                mask(NativeSpaceLoggerBridge.VERB_ADD_ITEM),
                 absPos.getX(),
                 absPos.getX(),
                 absPos.getY(),

@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use space_logger::{DbOptions, IntPredicate, LongPredicate, Query, Row, SpaceLoggerDb};
+use space_logger::{
+    DbOptions, IntPredicate, LongPredicate, Query, Row, SpaceLoggerDb, VERB_BREAK, VERB_HURT,
+    VERB_PLACE, VERB_USE, verb_mask_single,
+};
 
 const HOT_DATASET_ROWS: usize = 1_200_000;
 const COLD_DATASET_ROWS: usize = 1_200_000;
@@ -21,12 +24,11 @@ fn bench_row(seed: i32) -> Row {
         subject: format!("subject-{}", seed.rem_euclid(2_000)),
         object: format!("object-{}", seed.rem_euclid(700)),
         verb: match seed.rem_euclid(4) {
-            0 => "place",
-            1 => "break",
-            2 => "use",
-            _ => "hurt",
-        }
-        .to_string(),
+            0 => VERB_PLACE,
+            1 => VERB_BREAK,
+            2 => VERB_USE,
+            _ => VERB_HURT,
+        },
         time_ms: 1_700_000_000_000 + (seed as i64) * 17,
         subject_extra: format!("extra-{seed}"),
         data: vec![(seed & 0xff) as u8, ((seed * 5) & 0xff) as u8],
@@ -115,7 +117,7 @@ fn query_fixture() -> Query {
         }),
         subject: None,
         object: None,
-        verb: Some("place".to_string()),
+        verb_mask: verb_mask_single(VERB_PLACE),
     }
 }
 

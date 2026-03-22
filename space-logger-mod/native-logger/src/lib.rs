@@ -6,7 +6,9 @@ use std::sync::RwLock;
 use jni::JNIEnv;
 use jni::objects::{JByteArray, JClass, JObject, JObjectArray, JString, JValue};
 use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jint, jlong, jobjectArray};
-use space_logger::{DbError, DbOptions, IntPredicate, LongPredicate, Query, Row, SpaceLoggerDb};
+use space_logger::{
+    DbError, DbOptions, IntPredicate, LongPredicate, Query, Row, SpaceLoggerDb, verb_mask_single,
+};
 
 struct NativeDbHandle {
     db: RwLock<Option<SpaceLoggerDb>>,
@@ -76,9 +78,6 @@ fn to_java_query_row_array(env: &mut JNIEnv, rows: &[Row]) -> Result<jobjectArra
         let jsubject = env
             .new_string(&row.subject)
             .map_err(|e| format!("create subject string failed: {e}"))?;
-        let jverb = env
-            .new_string(&row.verb)
-            .map_err(|e| format!("create verb string failed: {e}"))?;
         let jobject = env
             .new_string(&row.object)
             .map_err(|e| format!("create object string failed: {e}"))?;
@@ -90,7 +89,6 @@ fn to_java_query_row_array(env: &mut JNIEnv, rows: &[Row]) -> Result<jobjectArra
             .map_err(|e| format!("create dataHead byte[] failed: {e}"))?;
 
         let jsubject_obj = JObject::from(jsubject);
-        let jverb_obj = JObject::from(jverb);
         let jobject_obj = JObject::from(jobject);
         let jsubject_extra_obj = JObject::from(jsubject_extra);
         let jdata_head_obj = JObject::from(jdata_head);
@@ -98,14 +96,14 @@ fn to_java_query_row_array(env: &mut JNIEnv, rows: &[Row]) -> Result<jobjectArra
         let jrow = env
             .new_object(
                 &row_class,
-                "(JIIILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I[B)V",
+                "(JIIILjava/lang/String;ILjava/lang/String;Ljava/lang/String;I[B)V",
                 &[
                     JValue::Long(row.time_ms),
                     JValue::Int(row.x),
                     JValue::Int(row.y),
                     JValue::Int(row.z),
                     JValue::Object(&jsubject_obj),
-                    JValue::Object(&jverb_obj),
+                    JValue::Int((row.verb & 0x7fff_ffff) as jint),
                     JValue::Object(&jobject_obj),
                     JValue::Object(&jsubject_extra_obj),
                     JValue::Int(row.data.len().min(i32::MAX as usize) as jint),
@@ -181,7 +179,7 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
     y: jint,
     z: jint,
     subject: JString,
-    verb: JString,
+    verb: jint,
     object: JString,
     time_ms: jlong,
     subject_extra: JString,
@@ -194,13 +192,10 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
             return JNI_FALSE;
         }
     };
-    let verb = match jstring_to_string(&mut env, verb) {
-        Ok(v) => v,
-        Err(e) => {
-            throw_runtime(&mut env, e);
-            return JNI_FALSE;
-        }
-    };
+    if !(0..32).contains(&verb) {
+        throw_runtime(&mut env, format!("invalid verb id: {verb}, expected 0..31"));
+        return JNI_FALSE;
+    }
     let object = match jstring_to_string(&mut env, object) {
         Ok(v) => v,
         Err(e) => {
@@ -229,7 +224,7 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
         z,
         subject,
         object,
-        verb,
+        verb: verb as u32,
         time_ms,
         subject_extra,
         data,
@@ -314,15 +309,11 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
     mut env: JNIEnv,
     _class: JClass,
     native_ptr: jlong,
-    verb: JString,
+    verb: jint,
 ) -> jint {
-    let verb = match jstring_to_string(&mut env, verb) {
-        Ok(v) => v,
-        Err(e) => {
-            throw_runtime(&mut env, e);
-            return 0;
-        }
-    };
+    if !(0..32).contains(&verb) {
+        return 0;
+    }
 
     let native = match handle_from_ptr(native_ptr) {
         Ok(handle) => handle,
@@ -345,7 +336,7 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
     };
 
     let query = Query {
-        verb: Some(verb),
+        verb_mask: verb_mask_single(verb as u32),
         ..Query::default()
     };
 
@@ -365,7 +356,7 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
     native_ptr: jlong,
     subject: JString,
     object: JString,
-    verb: JString,
+    verb_mask: jint,
     min_x: jint,
     max_x: jint,
     min_y: jint,
@@ -390,18 +381,10 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
             return ptr::null_mut();
         }
     };
-    let verb = match jstring_to_string(&mut env, verb) {
-        Ok(v) => v,
-        Err(e) => {
-            throw_runtime(&mut env, e);
-            return ptr::null_mut();
-        }
-    };
-
     let mut query = Query {
         subject: non_empty(subject),
         object: non_empty(object),
-        verb: non_empty(verb),
+        verb_mask: verb_mask as u32,
         ..Query::default()
     };
 

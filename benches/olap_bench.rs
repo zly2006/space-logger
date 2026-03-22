@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use space_logger::{DbOptions, Row, SpaceLoggerDb};
+use space_logger::{DbOptions, Row, SpaceLoggerDb, VERB_PLACE, VERB_USE};
 
 const FLUSH_ROWS: usize = 4096;
 const WRITE_BATCH_ROWS: [usize; 2] = [10_000, 50_000];
@@ -15,11 +15,7 @@ fn bench_row(seed: i32) -> Row {
         z: (seed * 7) % 10_000,
         subject: format!("subject-{}", seed % 500),
         object: format!("object-{}", seed % 200),
-        verb: if seed % 2 == 0 {
-            "click".to_string()
-        } else {
-            "view".to_string()
-        },
+        verb: if seed % 2 == 0 { VERB_PLACE } else { VERB_USE },
         time_ms: 1_700_000_000_000 + (seed as i64) * 10,
         subject_extra: format!("extra-{seed}"),
         data: vec![(seed & 0xff) as u8, ((seed + 1) & 0xff) as u8],

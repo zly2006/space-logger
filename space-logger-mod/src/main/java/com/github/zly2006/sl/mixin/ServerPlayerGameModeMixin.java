@@ -51,7 +51,7 @@ public abstract class ServerPlayerGameModeMixin {
             pos.getY(),
             pos.getZ(),
             NativeSpaceLoggerBridge.subject(this.player),
-            "break",
+            NativeSpaceLoggerBridge.VERB_BREAK,
             NativeSpaceLoggerBridge.blockId(this.sl$breakStateBefore),
             NativeSpaceLoggerBridge.subjectExtra(this.player),
             new byte[0]
@@ -89,7 +89,7 @@ public abstract class ServerPlayerGameModeMixin {
             pos.getY(),
             pos.getZ(),
             NativeSpaceLoggerBridge.subject(player),
-            "use",
+            NativeSpaceLoggerBridge.VERB_USE,
             NativeSpaceLoggerBridge.blockId(state),
             NativeSpaceLoggerBridge.subjectExtra(player),
             new byte[0]

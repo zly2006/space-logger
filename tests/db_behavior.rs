@@ -3,7 +3,10 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use space_logger::{DbOptions, IntPredicate, LongPredicate, Query, Row, SpaceLoggerDb};
+use space_logger::{
+    DbOptions, IntPredicate, LongPredicate, Query, Row, SpaceLoggerDb, VERB_ADD_ITEM, VERB_BREAK,
+    VERB_KILL, VERB_PLACE, VERB_REMOVE_ITEM, VERB_USE, verb_mask_single,
+};
 
 const SEGMENT_V2_MAGIC: [u8; 8] = *b"SLSEGv2\0";
 const SEGMENT_V2_HEADER_LEN: usize = 36;
@@ -18,6 +21,23 @@ fn inventory_delta_data(quantity_delta: i32, nbt_payload: &[u8]) -> Vec<u8> {
     bytes
 }
 
+fn verb(name: &str) -> u32 {
+    match name {
+        "click" => VERB_PLACE,
+        "view" => VERB_USE,
+        "purchase" => VERB_BREAK,
+        "kill" => VERB_KILL,
+        "add_item" => VERB_ADD_ITEM,
+        "remove_item" => VERB_REMOVE_ITEM,
+        "use" => VERB_USE,
+        _ => 31,
+    }
+}
+
+fn verb_mask(name: &str) -> u32 {
+    verb_mask_single(verb(name))
+}
+
 fn sample_row(seed: i32) -> Row {
     Row {
         x: seed,
@@ -25,7 +45,7 @@ fn sample_row(seed: i32) -> Row {
         z: seed + 2,
         subject: format!("subject-{seed}"),
         object: format!("object-{seed}"),
-        verb: "click".to_string(),
+        verb: verb("click"),
         time_ms: 1_700_000_000_000 + seed as i64,
         subject_extra: format!("extra-{seed}"),
         data: vec![seed as u8, (seed + 1) as u8],
@@ -46,12 +66,11 @@ fn no_match_query() -> Query {
 fn varied_row(seed: i32) -> Row {
     let subject = format!("subject-{}", seed % 17);
     let object = format!("object-{}", seed % 11);
-    let verb = match seed % 3 {
+    let verb_name = match seed % 3 {
         0 => "click",
         1 => "view",
         _ => "purchase",
-    }
-    .to_string();
+    };
 
     Row {
         x: (seed * 37) % 2000 - 1000,
@@ -59,7 +78,7 @@ fn varied_row(seed: i32) -> Row {
         z: (seed * 11) % 2000 - 1000,
         subject,
         object,
-        verb,
+        verb: verb(verb_name),
         time_ms: 1_700_000_000_000 + (seed as i64) * 13,
         subject_extra: format!("extra-{seed}"),
         data: vec![(seed & 0xff) as u8, ((seed * 3) & 0xff) as u8],
@@ -129,6 +148,11 @@ fn matches_long_predicate(value: i64, predicate: &Option<LongPredicate>) -> bool
 }
 
 fn row_matches_query(row: &Row, query: &Query) -> bool {
+    let verb_match = if row.verb < 32 {
+        (query.verb_mask & (1u32 << row.verb)) != 0
+    } else {
+        false
+    };
     matches_int_predicate(row.x, &query.x)
         && matches_int_predicate(row.y, &query.y)
         && matches_int_predicate(row.z, &query.z)
@@ -141,7 +165,7 @@ fn row_matches_query(row: &Row, query: &Query) -> bool {
             .object
             .as_ref()
             .is_none_or(|object| row.object == *object)
-        && query.verb.as_ref().is_none_or(|verb| row.verb == *verb)
+        && verb_match
 }
 
 fn fresh_db_dir(name: &str) -> PathBuf {
@@ -718,7 +742,7 @@ fn filter_logic_matches_reference_implementation_with_500_plus_rows() {
         },
         Query {
             object: Some("object-7".to_string()),
-            verb: Some("click".to_string()),
+            verb_mask: verb_mask("click"),
             ..Query::default()
         },
         Query {
@@ -745,7 +769,7 @@ fn filter_logic_matches_reference_implementation_with_500_plus_rows() {
                 lte: Some(1_700_000_004_000),
                 ..LongPredicate::default()
             }),
-            verb: Some("view".to_string()),
+            verb_mask: verb_mask("view"),
             ..Query::default()
         },
         Query {
@@ -1018,7 +1042,7 @@ fn same_location_object_kill_limit_keeps_latest_kill_records() {
         row.x = 123;
         row.y = 456;
         row.z = 789;
-        row.verb = "kill".to_string();
+        row.verb = verb("kill");
         row.object = if seed % 2 == 0 {
             "zombie".to_string()
         } else {
@@ -1045,7 +1069,7 @@ fn same_location_object_kill_limit_keeps_latest_kill_records() {
             eq: Some(789),
             ..IntPredicate::default()
         }),
-        verb: Some("kill".to_string()),
+        verb_mask: verb_mask("kill"),
         ..Query::default()
     };
     let rows = db.query(&query, None).expect("query should succeed");
@@ -1149,7 +1173,7 @@ fn kill_limit_is_applied_during_compaction_when_background_disabled() {
         row.x = 1;
         row.y = 2;
         row.z = 3;
-        row.verb = "kill".to_string();
+        row.verb = verb("kill");
         row.object = "zombie".to_string();
         db.insert_with_version(row, version)
             .expect("insert should succeed");
@@ -1169,7 +1193,7 @@ fn kill_limit_is_applied_during_compaction_when_background_disabled() {
             ..IntPredicate::default()
         }),
         object: Some("zombie".to_string()),
-        verb: Some("kill".to_string()),
+        verb_mask: verb_mask("kill"),
         ..Query::default()
     };
 
@@ -1215,7 +1239,7 @@ fn flush_merges_continuous_remove_then_add_item_rows() {
         z: 10,
         subject: "alice".to_string(),
         object: "dirt".to_string(),
-        verb: "remove_item".to_string(),
+        verb: verb("remove_item"),
         time_ms: 1_800_000_000_001,
         subject_extra: "uuid-alice".to_string(),
         data: inventory_delta_data(-4, &[1, 2, 3, 4, 5]),
@@ -1226,7 +1250,7 @@ fn flush_merges_continuous_remove_then_add_item_rows() {
         z: 10,
         subject: "alice".to_string(),
         object: "dirt".to_string(),
-        verb: "add_item".to_string(),
+        verb: verb("add_item"),
         time_ms: 1_800_000_000_002,
         subject_extra: "uuid-alice".to_string(),
         data: inventory_delta_data(4, &[1, 2, 3, 4, 5]),
@@ -1256,11 +1280,11 @@ fn flush_merges_continuous_remove_then_add_item_rows() {
         }),
         subject: Some("alice".to_string()),
         object: Some("dirt".to_string()),
-        verb: Some("remove_item".to_string()),
+        verb_mask: verb_mask("remove_item"),
         ..Query::default()
     };
     let add_query = Query {
-        verb: Some("add_item".to_string()),
+        verb_mask: verb_mask("add_item"),
         ..remove_query.clone()
     };
 
@@ -1308,7 +1332,7 @@ fn flush_does_not_merge_when_non_item_operation_breaks_sequence() {
             z: 20,
             subject: "alice".to_string(),
             object: "dirt".to_string(),
-            verb: "remove_item".to_string(),
+            verb: verb("remove_item"),
             time_ms: 1_800_000_000_011,
             subject_extra: "uuid-alice".to_string(),
             data: inventory_delta_data(-2, &[9, 9, 9]),
@@ -1319,7 +1343,7 @@ fn flush_does_not_merge_when_non_item_operation_breaks_sequence() {
             z: 20,
             subject: "alice".to_string(),
             object: "stone".to_string(),
-            verb: "use".to_string(),
+            verb: verb("use"),
             time_ms: 1_800_000_000_012,
             subject_extra: "uuid-alice".to_string(),
             data: vec![],
@@ -1330,7 +1354,7 @@ fn flush_does_not_merge_when_non_item_operation_breaks_sequence() {
             z: 20,
             subject: "alice".to_string(),
             object: "dirt".to_string(),
-            verb: "add_item".to_string(),
+            verb: verb("add_item"),
             time_ms: 1_800_000_000_013,
             subject_extra: "uuid-alice".to_string(),
             data: inventory_delta_data(2, &[9, 9, 9]),
@@ -1362,11 +1386,11 @@ fn flush_does_not_merge_when_non_item_operation_breaks_sequence() {
         ..Query::default()
     };
     let remove_query = Query {
-        verb: Some("remove_item".to_string()),
+        verb_mask: verb_mask("remove_item"),
         ..base_query.clone()
     };
     let add_query = Query {
-        verb: Some("add_item".to_string()),
+        verb_mask: verb_mask("add_item"),
         ..base_query
     };
 

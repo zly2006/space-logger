@@ -27,6 +27,14 @@ class SpaceLogger : ModInitializer {
             gameDir.resolve("space-logger-db"),
             4096
         )
+        if (java.lang.Boolean.getBoolean("fabric-api.gametest")) {
+            try {
+                bridgeInstance?.resetForTests()
+                LOGGER.info("Reset native space logger db for gametest run")
+            } catch (e: Exception) {
+                LOGGER.error("Failed to reset native space logger db for gametest run", e)
+            }
+        }
         ServerLifecycleEvents.SERVER_STOPPING.register {
             val bridge = bridgeInstance
             if (bridge == null || bridge.isClosed) {

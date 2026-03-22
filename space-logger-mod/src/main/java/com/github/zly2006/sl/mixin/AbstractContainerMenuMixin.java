@@ -86,12 +86,24 @@ public abstract class AbstractContainerMenuMixin {
             if (afterCount > beforeCount) {
                 ItemStack sample = afterSamples.get(key);
                 if (sample != null) {
-                    this.sl$appendContainerEvent(serverPlayer, pos, "add_item", sample, afterCount - beforeCount);
+                    this.sl$appendContainerEvent(
+                        serverPlayer,
+                        pos,
+                        NativeSpaceLoggerBridge.VERB_ADD_ITEM,
+                        sample,
+                        afterCount - beforeCount
+                    );
                 }
             } else if (afterCount < beforeCount) {
                 ItemStack sample = beforeSamples.get(key);
                 if (sample != null) {
-                    this.sl$appendContainerEvent(serverPlayer, pos, "remove_item", sample, afterCount - beforeCount);
+                    this.sl$appendContainerEvent(
+                        serverPlayer,
+                        pos,
+                        NativeSpaceLoggerBridge.VERB_REMOVE_ITEM,
+                        sample,
+                        afterCount - beforeCount
+                    );
                 }
             }
         }
@@ -144,7 +156,7 @@ public abstract class AbstractContainerMenuMixin {
     }
 
     @Unique
-    private void sl$appendContainerEvent(ServerPlayer player, BlockPos pos, String verb, ItemStack stack, int quantityDelta) {
+    private void sl$appendContainerEvent(ServerPlayer player, BlockPos pos, int verb, ItemStack stack, int quantityDelta) {
         if (stack.isEmpty()) {
             return;
         }

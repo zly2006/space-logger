@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
-use space_logger::{DbError, DbOptions, IntPredicate, LongPredicate, Query, Row, SpaceLoggerDb};
+use space_logger::{
+    DbError, DbOptions, IntPredicate, LongPredicate, Query, Row, SpaceLoggerDb, VERB_MASK_ALL,
+    verb_id_from_name, verb_mask_single, verb_name,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "space-logger")]
@@ -110,6 +113,7 @@ fn run() -> Result<(), CliError> {
             data_hex,
         } => {
             let final_time_ms = time_ms.unwrap_or_else(now_ms);
+            let verb = parse_verb_input(&verb)?;
             let row = Row {
                 x,
                 y,
@@ -138,7 +142,7 @@ fn run() -> Result<(), CliError> {
                     row.y,
                     row.z,
                     row.subject,
-                    row.verb,
+                    verb_name(row.verb),
                     row.object,
                     row.time_ms,
                     row.subject_extra,
@@ -218,12 +222,20 @@ fn parse_query_filters(filters: &[String]) -> Result<Query, CliError> {
             }
             "verb" => {
                 let value = next_token(filters, &mut index, "verb value")?.to_string();
-                if op != "=" && op != "==" {
-                    return Err(CliError::Usage(
-                        "verb only supports `=` operator".to_string(),
-                    ));
+                let new_mask = match op.as_str() {
+                    "=" | "==" => verb_mask_single(parse_verb_input(&value)?),
+                    "in" => parse_verb_in_mask(&value)?,
+                    _ => {
+                        return Err(CliError::Usage(
+                            "verb only supports `=` or `in` operator".to_string(),
+                        ));
+                    }
+                };
+                if query.verb_mask == VERB_MASK_ALL {
+                    query.verb_mask = new_mask;
+                } else {
+                    query.verb_mask &= new_mask;
                 }
-                assign_string_field(&mut query.verb, value, "verb")?;
             }
             _ => {
                 return Err(CliError::Usage(format!(
@@ -381,6 +393,44 @@ fn parse_i64(value: &str, field: &str) -> Result<i64, CliError> {
     value
         .parse::<i64>()
         .map_err(|_| CliError::Usage(format!("invalid i64 value `{value}` for field `{field}`")))
+}
+
+fn parse_verb_input(value: &str) -> Result<u32, CliError> {
+    let normalized = value.trim().to_lowercase();
+    if normalized.is_empty() {
+        return Err(CliError::Usage("verb cannot be empty".to_string()));
+    }
+    if let Some(verb) = verb_id_from_name(&normalized) {
+        return Ok(verb);
+    }
+    let numeric = normalized.parse::<u32>().map_err(|_| {
+        CliError::Usage(format!(
+            "invalid verb `{value}`, expected known name or integer in 0..31"
+        ))
+    })?;
+    if numeric >= 32 {
+        return Err(CliError::Usage(format!(
+            "invalid verb id `{numeric}`, expected integer in 0..31"
+        )));
+    }
+    Ok(numeric)
+}
+
+fn parse_verb_in_mask(value: &str) -> Result<u32, CliError> {
+    let mut mask = 0u32;
+    for raw in value.split(',') {
+        let token = raw.trim();
+        if token.is_empty() {
+            continue;
+        }
+        mask |= verb_mask_single(parse_verb_input(token)?);
+    }
+    if mask == 0 {
+        return Err(CliError::Usage(
+            "verb in requires at least one valid verb".to_string(),
+        ));
+    }
+    Ok(mask)
 }
 
 fn parse_hex(hex: &str) -> Result<Vec<u8>, CliError> {

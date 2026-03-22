@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -40,6 +41,14 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
     private static final int INVENTORY_DATA_HEADER_BYTES = 12;
     private static final int QUERY_DATA_HEAD_BYTES = 12;
     private static final Set<UUID> RECENT_PLACE_PLAYERS = ConcurrentHashMap.newKeySet();
+    public static final int VERB_HURT = 0;
+    public static final int VERB_KILL = 1;
+    public static final int VERB_BREAK = 2;
+    public static final int VERB_PLACE = 3;
+    public static final int VERB_USE = 4;
+    public static final int VERB_ADD_ITEM = 5;
+    public static final int VERB_REMOVE_ITEM = 6;
+    public static final int VERB_MASK_ALL = -1;
 
     private static volatile boolean loaded;
 
@@ -95,7 +104,7 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
         int y,
         int z,
         String subject,
-        String verb,
+        int verb,
         String object,
         long timeMs,
         String subjectExtra,
@@ -108,7 +117,7 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
             y,
             z,
             safe(subject),
-            safe(verb),
+            verb,
             safe(object),
             timeMs,
             safe(subjectExtra),
@@ -124,7 +133,7 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
         int y,
         int z,
         String subject,
-        String verb,
+        int verb,
         String object,
         String subjectExtra,
         byte[] data
@@ -136,14 +145,14 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
         return nativeCountAll(requireNativePtr());
     }
 
-    public int countByVerb(String verb) {
-        return nativeCountByVerb(requireNativePtr(), safe(verb));
+    public int countByVerb(int verb) {
+        return nativeCountByVerb(requireNativePtr(), verb);
     }
 
     public List<QueryRow> queryRows(
         String subject,
         String object,
-        String verb,
+        int verbMask,
         int minX,
         int maxX,
         int minY,
@@ -159,7 +168,7 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
             requireNativePtr(),
             safe(subject),
             safe(object),
-            safe(verb),
+            verbMask,
             minX,
             maxX,
             minY,
@@ -328,6 +337,42 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
         return RECENT_PLACE_PLAYERS.remove(player.getUUID());
     }
 
+    public static int verbMaskSingle(int verb) {
+        if (verb < 0 || verb >= 32) {
+            return 0;
+        }
+        return 1 << verb;
+    }
+
+    public static int verbIdFromName(String name) {
+        if (name == null || name.isBlank()) {
+            return -1;
+        }
+        return switch (name.toLowerCase(Locale.ROOT)) {
+            case "hurt" -> VERB_HURT;
+            case "kill" -> VERB_KILL;
+            case "break" -> VERB_BREAK;
+            case "place" -> VERB_PLACE;
+            case "use" -> VERB_USE;
+            case "add_item" -> VERB_ADD_ITEM;
+            case "remove_item" -> VERB_REMOVE_ITEM;
+            default -> -1;
+        };
+    }
+
+    public static String verbName(int verb) {
+        return switch (verb) {
+            case VERB_HURT -> "hurt";
+            case VERB_KILL -> "kill";
+            case VERB_BREAK -> "break";
+            case VERB_PLACE -> "place";
+            case VERB_USE -> "use";
+            case VERB_ADD_ITEM -> "add_item";
+            case VERB_REMOVE_ITEM -> "remove_item";
+            default -> "unknown";
+        };
+    }
+
     private static void loadNativeLibrary(Path gameDir) {
         String explicit = System.getProperty("space_logger_native_lib");
         if (explicit != null && !explicit.isBlank()) {
@@ -379,7 +424,7 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
         int y,
         int z,
         String subject,
-        String verb,
+        int verb,
         String object,
         long timeMs,
         String subjectExtra,
@@ -388,13 +433,13 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
 
     private static native int nativeCountAll(long nativePtr);
 
-    private static native int nativeCountByVerb(long nativePtr, String verb);
+    private static native int nativeCountByVerb(long nativePtr, int verb);
 
     private static native QueryRow[] nativeQuery(
         long nativePtr,
         String subject,
         String object,
-        String verb,
+        int verbMask,
         int minX,
         int maxX,
         int minY,
@@ -416,7 +461,7 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
         int y,
         int z,
         String subject,
-        String verb,
+        int verb,
         String object,
         String subjectExtra,
         int dataLen,
@@ -429,6 +474,10 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
         @Override
         public byte[] dataHead() {
             return dataHead.clone();
+        }
+
+        public String verbName() {
+            return NativeSpaceLoggerBridge.verbName(verb);
         }
 
         public boolean hasInventoryDataHeader() {

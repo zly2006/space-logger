@@ -93,7 +93,7 @@ public final class SpaceLoggerCommand {
         List<NativeSpaceLoggerBridge.QueryRow> rows = SpaceLogger.bridge().queryRows(
             filters.subject,
             filters.object,
-            filters.verb,
+            filters.verbMask,
             filters.minX,
             filters.maxX,
             filters.minY,
@@ -138,7 +138,7 @@ public final class SpaceLoggerCommand {
         line.append(Component.literal(" "));
         line.append(Component.literal(row.subject()).withStyle(ChatFormatting.WHITE));
         line.append(Component.literal(" "));
-        line.append(Component.literal(row.verb()).withStyle(ChatFormatting.GOLD));
+        line.append(Component.literal(row.verbName()).withStyle(ChatFormatting.GOLD));
         line.append(Component.literal(" "));
         line.append(formatObjectComponent(row).withStyle(ChatFormatting.YELLOW));
         line.append(Component.literal(" "));
@@ -230,7 +230,7 @@ public final class SpaceLoggerCommand {
 
         String subject = "";
         String object = "";
-        String verb = "";
+        int verbMask = NativeSpaceLoggerBridge.VERB_MASK_ALL;
         Integer range = null;
         Integer limit = null;
         Long afterTimeMs = null;
@@ -249,7 +249,7 @@ public final class SpaceLoggerCommand {
             switch (key) {
                 case "subject" -> subject = value;
                 case "object" -> object = value;
-                case "verb" -> verb = value;
+                case "verb" -> verbMask &= parseVerbMask(value);
                 case "range" -> {
                     int parsed = parsePositiveInt(value, "range");
                     range = parsed;
@@ -301,7 +301,7 @@ public final class SpaceLoggerCommand {
         return new ParsedFilters(
             subject,
             object,
-            verb,
+            verbMask,
             minX,
             maxX,
             minY,
@@ -324,6 +324,40 @@ public final class SpaceLoggerCommand {
         } catch (NumberFormatException e) {
             throw syntax(field + " expects an integer value");
         }
+    }
+
+    private static int parseVerbMask(String rawValue) throws CommandSyntaxException {
+        if (rawValue == null || rawValue.isBlank()) {
+            throw syntax("verb filter must not be empty");
+        }
+
+        int mask = 0;
+        String[] tokens = rawValue.split(",");
+        for (String token : tokens) {
+            String value = token.trim();
+            if (value.isEmpty()) {
+                continue;
+            }
+
+            int verbId = NativeSpaceLoggerBridge.verbIdFromName(value);
+            if (verbId < 0) {
+                try {
+                    verbId = Integer.parseInt(value);
+                } catch (NumberFormatException e) {
+                    throw syntax("unknown verb: `" + value + "`");
+                }
+            }
+
+            if (verbId < 0 || verbId >= 32) {
+                throw syntax("verb id out of range: `" + verbId + "`, expected 0..31");
+            }
+            mask |= NativeSpaceLoggerBridge.verbMaskSingle(verbId);
+        }
+
+        if (mask == 0) {
+            throw syntax("verb filter produced empty set");
+        }
+        return mask;
     }
 
     private static long parseHumanDurationMillis(String value) throws CommandSyntaxException {
@@ -385,7 +419,7 @@ public final class SpaceLoggerCommand {
     private static final class ParsedFilters {
         private final String subject;
         private final String object;
-        private final String verb;
+        private final int verbMask;
         private final int minX;
         private final int maxX;
         private final int minY;
@@ -399,7 +433,7 @@ public final class SpaceLoggerCommand {
         private ParsedFilters(
             String subject,
             String object,
-            String verb,
+            int verbMask,
             int minX,
             int maxX,
             int minY,
@@ -412,7 +446,7 @@ public final class SpaceLoggerCommand {
         ) {
             this.subject = subject;
             this.object = object;
-            this.verb = verb;
+            this.verbMask = verbMask;
             this.minX = minX;
             this.maxX = maxX;
             this.minY = minY;
