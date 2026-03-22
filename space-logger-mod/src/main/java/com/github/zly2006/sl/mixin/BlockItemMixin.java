@@ -39,5 +39,6 @@ public abstract class BlockItemMixin {
             NativeSpaceLoggerBridge.subjectExtra(serverPlayer),
             new byte[0]
         );
+        NativeSpaceLoggerBridge.markRecentPlace(serverPlayer);
     }
 }

@@ -140,7 +140,7 @@ public final class SpaceLoggerCommand {
         line.append(Component.literal(" "));
         line.append(Component.literal(row.verb()).withStyle(ChatFormatting.GOLD));
         line.append(Component.literal(" "));
-        line.append(formatObjectComponent(row.object()).withStyle(ChatFormatting.YELLOW));
+        line.append(formatObjectComponent(row).withStyle(ChatFormatting.YELLOW));
         line.append(Component.literal(" "));
         line.append(Component.literal(coordText).withStyle(style ->
             style.withColor(ChatFormatting.GREEN)
@@ -155,6 +155,15 @@ public final class SpaceLoggerCommand {
             ));
         }
         return line;
+    }
+
+    private static MutableComponent formatObjectComponent(NativeSpaceLoggerBridge.QueryRow row) {
+        MutableComponent objectComponent = formatObjectComponent(row.object());
+        int quantity = quantityForDisplay(row);
+        if (quantity > 0) {
+            objectComponent.append(Component.literal(" x" + quantity));
+        }
+        return objectComponent;
     }
 
     private static MutableComponent formatObjectComponent(String objectRaw) {
@@ -178,6 +187,17 @@ public final class SpaceLoggerCommand {
         }
 
         return Component.literal(objectRaw);
+    }
+
+    private static int quantityForDisplay(NativeSpaceLoggerBridge.QueryRow row) {
+        if (!row.hasInventoryDataHeader()) {
+            return 0;
+        }
+        int delta = row.quantityDelta();
+        if (delta == 0) {
+            return 0;
+        }
+        return Math.abs(delta);
     }
 
     private static String formatRelativeTime(long eventTimeMs, long nowMs) {

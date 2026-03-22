@@ -8,13 +8,18 @@ import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
+import net.minecraft.world.inventory.AbstractContainerMenu;
+import net.minecraft.world.inventory.ContainerInput;
+import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.entity.monster.zombie.Zombie;
 
 public class SpaceLoggerGameTests {
     @GameTest
@@ -27,7 +32,6 @@ public class SpaceLoggerGameTests {
         player.setGameMode(GameType.SURVIVAL);
 
         net.minecraft.world.entity.monster.zombie.Zombie zombie = helper.spawn(EntityType.ZOMBIE, new BlockPos(1, 1, 1));
-        helper.hurt(zombie, player.damageSources().playerAttack(player), 2.0F);
         helper.hurt(zombie, player.damageSources().playerAttack(player), 100.0F);
 
         helper.runAfterDelay(2, () -> {
@@ -35,8 +39,8 @@ public class SpaceLoggerGameTests {
             int killCount = NativeSpaceLoggerBridge.countByVerb("kill");
             int noMatchCount = NativeSpaceLoggerBridge.countByVerb("verb_does_not_exist");
 
-            helper.assertTrue(hurtCount > hurtBefore, "expected hurt count to increase");
-            helper.assertTrue(killCount > killBefore, "expected kill count to increase");
+            helper.assertTrue(hurtCount == hurtBefore + 1, "expected hurt count to increase by exactly 1");
+            helper.assertTrue(killCount == killBefore + 1, "expected kill count to increase by exactly 1");
             helper.assertTrue(noMatchCount == noMatchBefore, "expected unknown verb count unchanged");
             helper.succeed();
         });
@@ -46,8 +50,8 @@ public class SpaceLoggerGameTests {
     public void recordsBreakPlaceUse(GameTestHelper helper) {
         int placeBefore = NativeSpaceLoggerBridge.countByVerb("place");
         int breakBefore = NativeSpaceLoggerBridge.countByVerb("break");
-        int useBefore = NativeSpaceLoggerBridge.countByVerb("use");
         int noMatchBefore = NativeSpaceLoggerBridge.countByVerb("verb_does_not_exist");
+        long startTimeMs = System.currentTimeMillis();
 
         ServerPlayer player = helper.makeMockServerPlayerInLevel();
         player.setGameMode(GameType.SURVIVAL);
@@ -82,6 +86,7 @@ public class SpaceLoggerGameTests {
         helper.setBlock(usePos, Blocks.LEVER, Direction.NORTH);
         BlockPos absUsePos = helper.absolutePos(usePos);
         player.setPos(absUsePos.getX() + 0.5, absUsePos.getY() + 1.0, absUsePos.getZ() + 0.5);
+        player.setItemInHand(InteractionHand.MAIN_HAND, ItemStack.EMPTY);
         BlockHitResult useHit = new BlockHitResult(
             Vec3.atCenterOf(absUsePos),
             Direction.NORTH,
@@ -100,14 +105,183 @@ public class SpaceLoggerGameTests {
         helper.runAfterDelay(2, () -> {
             int placeCount = NativeSpaceLoggerBridge.countByVerb("place");
             int breakCount = NativeSpaceLoggerBridge.countByVerb("break");
-            int useCount = NativeSpaceLoggerBridge.countByVerb("use");
             int noMatchCount = NativeSpaceLoggerBridge.countByVerb("verb_does_not_exist");
+            int useAtPlacePos = NativeSpaceLoggerBridge.queryRows(
+                "",
+                "",
+                "use",
+                absPlacePos.getX(),
+                absPlacePos.getX(),
+                absPlacePos.getY(),
+                absPlacePos.getY(),
+                absPlacePos.getZ(),
+                absPlacePos.getZ(),
+                startTimeMs,
+                Long.MAX_VALUE,
+                32
+            ).size();
+            int useAtUsePos = NativeSpaceLoggerBridge.queryRows(
+                "",
+                "",
+                "use",
+                absUsePos.getX(),
+                absUsePos.getX(),
+                absUsePos.getY(),
+                absUsePos.getY(),
+                absUsePos.getZ(),
+                absUsePos.getZ(),
+                startTimeMs,
+                Long.MAX_VALUE,
+                32
+            ).size();
 
-            helper.assertTrue(placeCount > placeBefore, "expected place count to increase");
-            helper.assertTrue(breakCount > breakBefore, "expected break count to increase");
-            helper.assertTrue(useCount > useBefore, "expected use count to increase");
+            helper.assertTrue(
+                placeCount == placeBefore + 1,
+                "expected place count to increase by exactly 1, before=" + placeBefore + ", after=" + placeCount
+            );
+            helper.assertTrue(
+                breakCount == breakBefore + 1,
+                "expected break count to increase by exactly 1, before=" + breakBefore + ", after=" + breakCount
+            );
+            helper.assertTrue(useAtPlacePos == 0, "expected place action to not log use");
+            helper.assertTrue(useAtUsePos == 1, "expected exactly one use row on lever position");
             helper.assertTrue(noMatchCount == noMatchBefore, "expected unknown verb count unchanged");
             helper.succeed();
         });
+    }
+
+    @GameTest
+    public void recordsAddAndRemoveItem(GameTestHelper helper) {
+        int noMatchBefore = NativeSpaceLoggerBridge.countByVerb("verb_does_not_exist");
+        long startTimeMs = System.currentTimeMillis();
+
+        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        player.setGameMode(GameType.SURVIVAL);
+
+        BlockPos chestPos = new BlockPos(1, 1, 1);
+        helper.setBlock(chestPos, Blocks.CHEST);
+        BlockPos absChestPos = helper.absolutePos(chestPos);
+
+        player.getInventory().setItem(0, new ItemStack(Items.DIRT, 2));
+        player.getInventory().setItem(1, ItemStack.EMPTY);
+        helper.getBlockEntity(chestPos, net.minecraft.world.level.block.entity.ChestBlockEntity.class)
+            .setItem(1, new ItemStack(Items.COBBLESTONE, 3));
+
+        player.setPos(absChestPos.getX() + 0.5D, absChestPos.getY() + 1.0D, absChestPos.getZ() + 0.5D);
+        BlockHitResult chestHit = new BlockHitResult(
+            Vec3.atCenterOf(absChestPos),
+            Direction.NORTH,
+            absChestPos,
+            true
+        );
+        InteractionResult openResult = player.gameMode.useItemOn(
+            player,
+            helper.getLevel(),
+            player.getItemInHand(InteractionHand.MAIN_HAND),
+            InteractionHand.MAIN_HAND,
+            chestHit
+        );
+        helper.assertTrue(openResult.consumesAction(), "expected chest open to consume action");
+
+        AbstractContainerMenu menu = player.containerMenu;
+        helper.assertTrue(menu != player.inventoryMenu, "expected a container menu to be opened");
+
+        int playerHotbar0 = findMenuSlotIndex(menu, player, true, 0);
+        int playerHotbar1 = findMenuSlotIndex(menu, player, true, 1);
+        int chestSlot0 = findMenuSlotIndex(menu, player, false, 0);
+        int chestSlot1 = findMenuSlotIndex(menu, player, false, 1);
+        helper.assertTrue(playerHotbar0 >= 0, "failed to locate player hotbar slot 0 in menu");
+        helper.assertTrue(playerHotbar1 >= 0, "failed to locate player hotbar slot 1 in menu");
+        helper.assertTrue(chestSlot0 >= 0, "failed to locate chest slot 0 in menu");
+        helper.assertTrue(chestSlot1 >= 0, "failed to locate chest slot 1 in menu");
+
+        menu.clicked(playerHotbar0, 0, ContainerInput.PICKUP, player);
+        menu.clicked(chestSlot0, 0, ContainerInput.PICKUP, player);
+        ItemStack addedStack = menu.getSlot(chestSlot0).getItem();
+        helper.assertTrue(
+            addedStack.getItem() == Items.DIRT && addedStack.getCount() == 2,
+            "expected chest slot 0 to contain 2 dirt after add click sequence"
+        );
+
+        menu.clicked(chestSlot1, 0, ContainerInput.PICKUP, player);
+        menu.clicked(playerHotbar1, 0, ContainerInput.PICKUP, player);
+        ItemStack removedFromChest = menu.getSlot(chestSlot1).getItem();
+        helper.assertTrue(
+            removedFromChest.isEmpty(),
+            "expected chest slot 1 to be empty after remove click sequence"
+        );
+
+        helper.runAfterDelay(2, () -> {
+            var addRows = NativeSpaceLoggerBridge.queryRows(
+                "",
+                "",
+                "add_item",
+                absChestPos.getX(),
+                absChestPos.getX(),
+                absChestPos.getY(),
+                absChestPos.getY(),
+                absChestPos.getZ(),
+                absChestPos.getZ(),
+                startTimeMs,
+                Long.MAX_VALUE,
+                32
+            );
+            var removeRows = NativeSpaceLoggerBridge.queryRows(
+                "",
+                "",
+                "remove_item",
+                absChestPos.getX(),
+                absChestPos.getX(),
+                absChestPos.getY(),
+                absChestPos.getY(),
+                absChestPos.getZ(),
+                absChestPos.getZ(),
+                startTimeMs,
+                Long.MAX_VALUE,
+                32
+            );
+            int addCount = addRows.size();
+            int removeCount = removeRows.size();
+            int noMatchCount = NativeSpaceLoggerBridge.countByVerb("verb_does_not_exist");
+            int addGlobal = NativeSpaceLoggerBridge.countByVerb("add_item");
+            int removeGlobal = NativeSpaceLoggerBridge.countByVerb("remove_item");
+
+            helper.assertTrue(
+                addCount == 1,
+                "expected add_item count in chest area to be exactly 1, actual=" + addCount + ", global=" + addGlobal
+            );
+            helper.assertTrue(
+                removeCount == 1,
+                "expected remove_item count in chest area to be exactly 1, actual=" + removeCount + ", global=" + removeGlobal
+            );
+            NativeSpaceLoggerBridge.QueryRow addRow = addRows.getFirst();
+            NativeSpaceLoggerBridge.QueryRow removeRow = removeRows.getFirst();
+            helper.assertTrue(addRow.dataLen() > 12, "expected add_item row dataLen > 12");
+            helper.assertTrue(removeRow.dataLen() > 12, "expected remove_item row dataLen > 12");
+            helper.assertTrue(addRow.dataHead().length == 12, "expected add_item data head to be 12 bytes");
+            helper.assertTrue(removeRow.dataHead().length == 12, "expected remove_item data head to be 12 bytes");
+            helper.assertTrue(addRow.hasInventoryDataHeader(), "expected add_item row to include inventory header");
+            helper.assertTrue(removeRow.hasInventoryDataHeader(), "expected remove_item row to include inventory header");
+            helper.assertTrue(addRow.quantityDelta() == 2, "expected add_item quantity delta = +2");
+            helper.assertTrue(removeRow.quantityDelta() == -3, "expected remove_item quantity delta = -3");
+            helper.assertTrue(addRow.nbtPayloadLen() > 0, "expected add_item nbt payload len > 0");
+            helper.assertTrue(removeRow.nbtPayloadLen() > 0, "expected remove_item nbt payload len > 0");
+            helper.assertTrue(noMatchCount == noMatchBefore, "expected unknown verb count unchanged");
+            helper.succeed();
+        });
+    }
+
+    private static int findMenuSlotIndex(AbstractContainerMenu menu, Player player, boolean playerInventory, int containerSlot) {
+        for (int i = 0; i < menu.slots.size(); i++) {
+            Slot slot = menu.slots.get(i);
+            boolean isPlayerInventorySlot = slot.container == player.getInventory();
+            if (isPlayerInventorySlot != playerInventory) {
+                continue;
+            }
+            if (slot.getContainerSlot() == containerSlot) {
+                return i;
+            }
+        }
+        return -1;
     }
 }

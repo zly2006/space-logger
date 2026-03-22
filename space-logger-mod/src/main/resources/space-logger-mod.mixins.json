@@ -4,6 +4,7 @@
   "package": "com.github.zly2006.sl.mixin",
   "compatibilityLevel": "JAVA_25",
   "mixins": [
+    "AbstractContainerMenuMixin",
     "BlockItemMixin",
     "LivingEntityMixin",
     "ServerPlayerGameModeMixin"

@@ -4,7 +4,7 @@ use std::ptr;
 use std::sync::Mutex;
 
 use jni::JNIEnv;
-use jni::objects::{JByteArray, JClass, JObject, JObjectArray, JString};
+use jni::objects::{JByteArray, JClass, JObject, JObjectArray, JString, JValue};
 use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jint, jlong, jobjectArray};
 use once_cell::sync::Lazy;
 use space_logger::{DbError, DbOptions, IntPredicate, LongPredicate, Query, Row, SpaceLoggerDb};
@@ -41,35 +41,63 @@ fn non_empty(value: String) -> Option<String> {
     if value.is_empty() { None } else { Some(value) }
 }
 
-fn query_row_to_wire(row: Row) -> String {
-    format!(
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-        row.time_ms,
-        row.x,
-        row.y,
-        row.z,
-        row.subject,
-        row.verb,
-        row.object,
-        row.subject_extra,
-        row.data.len()
-    )
+fn data_head_12(data: &[u8]) -> &[u8] {
+    let head_len = data.len().min(12);
+    &data[..head_len]
 }
 
-fn to_java_string_array(env: &mut JNIEnv, lines: &[String]) -> Result<jobjectArray, String> {
-    let string_class = env
-        .find_class("java/lang/String")
-        .map_err(|e| format!("find String class failed: {e}"))?;
+fn to_java_query_row_array(env: &mut JNIEnv, rows: &[Row]) -> Result<jobjectArray, String> {
+    let row_class = env
+        .find_class("com/github/zly2006/sl/jni/NativeSpaceLoggerBridge$QueryRow")
+        .map_err(|e| format!("find QueryRow class failed: {e}"))?;
     let array: JObjectArray = env
-        .new_object_array(lines.len() as jint, &string_class, JObject::null())
-        .map_err(|e| format!("create String[] failed: {e}"))?;
+        .new_object_array(rows.len() as jint, &row_class, JObject::null())
+        .map_err(|e| format!("create QueryRow[] failed: {e}"))?;
 
-    for (idx, line) in lines.iter().enumerate() {
-        let jline = env
-            .new_string(line)
-            .map_err(|e| format!("create String element failed: {e}"))?;
-        env.set_object_array_element(&array, idx as jint, JObject::from(jline))
-            .map_err(|e| format!("set String[] element failed: {e}"))?;
+    for (idx, row) in rows.iter().enumerate() {
+        let jsubject = env
+            .new_string(&row.subject)
+            .map_err(|e| format!("create subject string failed: {e}"))?;
+        let jverb = env
+            .new_string(&row.verb)
+            .map_err(|e| format!("create verb string failed: {e}"))?;
+        let jobject = env
+            .new_string(&row.object)
+            .map_err(|e| format!("create object string failed: {e}"))?;
+        let jsubject_extra = env
+            .new_string(&row.subject_extra)
+            .map_err(|e| format!("create subjectExtra string failed: {e}"))?;
+        let jdata_head = env
+            .byte_array_from_slice(data_head_12(&row.data))
+            .map_err(|e| format!("create dataHead byte[] failed: {e}"))?;
+
+        let jsubject_obj = JObject::from(jsubject);
+        let jverb_obj = JObject::from(jverb);
+        let jobject_obj = JObject::from(jobject);
+        let jsubject_extra_obj = JObject::from(jsubject_extra);
+        let jdata_head_obj = JObject::from(jdata_head);
+
+        let jrow = env
+            .new_object(
+                &row_class,
+                "(JIIILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I[B)V",
+                &[
+                    JValue::Long(row.time_ms),
+                    JValue::Int(row.x),
+                    JValue::Int(row.y),
+                    JValue::Int(row.z),
+                    JValue::Object(&jsubject_obj),
+                    JValue::Object(&jverb_obj),
+                    JValue::Object(&jobject_obj),
+                    JValue::Object(&jsubject_extra_obj),
+                    JValue::Int(row.data.len().min(i32::MAX as usize) as jint),
+                    JValue::Object(&jdata_head_obj),
+                ],
+            )
+            .map_err(|e| format!("create QueryRow object failed: {e}"))?;
+
+        env.set_object_array_element(&array, idx as jint, jrow)
+            .map_err(|e| format!("set QueryRow[] element failed: {e}"))?;
     }
 
     Ok(array.into_raw())
@@ -377,8 +405,7 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
     };
     drop(state);
 
-    let wire_rows = rows.into_iter().map(query_row_to_wire).collect::<Vec<_>>();
-    match to_java_string_array(&mut env, &wire_rows) {
+    match to_java_query_row_array(&mut env, &rows) {
         Ok(array) => array,
         Err(e) => {
             throw_runtime(&mut env, e);
