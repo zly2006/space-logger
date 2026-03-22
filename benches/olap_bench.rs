@@ -1,12 +1,11 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use space_logger::{DbOptions, IntPredicate, LongPredicate, Query, Row, SpaceLoggerDb};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use space_logger::{DbOptions, Row, SpaceLoggerDb};
 
 const FLUSH_ROWS: usize = 4096;
 const WRITE_BATCH_ROWS: [usize; 2] = [10_000, 50_000];
-const QUERY_DATASET_ROWS: usize = 2_000_000;
 const INSERT_CHUNK_SIZE: usize = 500;
 
 fn bench_row(seed: i32) -> Row {
@@ -66,6 +65,7 @@ fn bench_write_ingest(c: &mut Criterion) {
                         &db_dir,
                         DbOptions {
                             memtable_flush_rows: FLUSH_ROWS,
+                            ..DbOptions::default()
                         },
                     )
                     .expect("open should succeed");
@@ -85,75 +85,5 @@ fn bench_write_ingest(c: &mut Criterion) {
     group.finish();
 }
 
-fn build_query_db(rows: usize) -> (PathBuf, SpaceLoggerDb) {
-    let db_dir = fresh_db_dir("query_dataset");
-    let db = SpaceLoggerDb::open(
-        &db_dir,
-        DbOptions {
-            memtable_flush_rows: FLUSH_ROWS,
-        },
-    )
-    .expect("open should succeed");
-
-    let data = build_rows(rows);
-    write_rows(&db, &data);
-    db.flush().expect("flush should succeed");
-
-    (db_dir, db)
-}
-
-fn bench_range_query(c: &mut Criterion) {
-    let (db_dir, db) = build_query_db(QUERY_DATASET_ROWS);
-
-    let query = Query {
-        x: Some(IntPredicate {
-            gte: Some(1200),
-            lte: Some(3200),
-            ..IntPredicate::default()
-        }),
-        y: Some(IntPredicate {
-            gte: Some(800),
-            lte: Some(6000),
-            ..IntPredicate::default()
-        }),
-        z: Some(IntPredicate {
-            gte: Some(2000),
-            lte: Some(7200),
-            ..IntPredicate::default()
-        }),
-        time_ms: Some(LongPredicate {
-            gte: Some(1_700_000_500_000),
-            lte: Some(1_700_001_200_000),
-            ..LongPredicate::default()
-        }),
-        subject: Some("subject-42".to_string()),
-        object: None,
-        verb: Some("click".to_string()),
-    };
-
-    let warmup_hits = db
-        .query(&query, None)
-        .expect("warmup query should succeed")
-        .len() as u64;
-
-    let mut group = c.benchmark_group("range_query");
-    group.sample_size(20);
-    group.warm_up_time(Duration::from_secs(1));
-    group.measurement_time(Duration::from_secs(6));
-    group.throughput(Throughput::Elements(warmup_hits.max(1)));
-
-    group.bench_function("xyz_time_subject_verb", |b| {
-        b.iter(|| {
-            let rows = db
-                .query(black_box(&query), None)
-                .expect("query should succeed during benchmark");
-            black_box(rows.len())
-        });
-    });
-
-    group.finish();
-    let _ = std::fs::remove_dir_all(db_dir);
-}
-
-criterion_group!(benches, bench_write_ingest, bench_range_query);
+criterion_group!(benches, bench_write_ingest);
 criterion_main!(benches);

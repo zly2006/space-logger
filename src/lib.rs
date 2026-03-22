@@ -3,10 +3,16 @@ use std::fmt::{Display, Formatter};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
+
+const AUTO_COMPACTION_TRIGGER_SEGMENTS: usize = 64;
+const AUTO_COMPACTION_BATCH_SEGMENTS: usize = 8;
+const SEGMENT_V2_MAGIC: [u8; 8] = *b"SLSEGv2\0";
+const SEGMENT_V2_HEADER_LEN: u64 = 36;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Row {
@@ -131,12 +137,16 @@ pub struct Query {
 #[derive(Clone, Debug)]
 pub struct DbOptions {
     pub memtable_flush_rows: usize,
+    pub same_location_kill_limit: usize,
+    pub enable_background_maintenance: bool,
 }
 
 impl Default for DbOptions {
     fn default() -> Self {
         Self {
             memtable_flush_rows: 4096,
+            same_location_kill_limit: 50,
+            enable_background_maintenance: true,
         }
     }
 }
@@ -148,6 +158,7 @@ pub enum DbError {
     VersionConflict { expected: u64, actual: u64 },
     PoisonedLock,
     CorruptedWal(String),
+    CorruptedSegment(String),
 }
 
 impl Display for DbError {
@@ -163,6 +174,7 @@ impl Display for DbError {
             }
             Self::PoisonedLock => write!(f, "lock poisoned"),
             Self::CorruptedWal(message) => write!(f, "corrupted wal: {message}"),
+            Self::CorruptedSegment(message) => write!(f, "corrupted segment: {message}"),
         }
     }
 }
@@ -230,10 +242,6 @@ impl ColumnStore {
             data: self.data[row_id].clone(),
         }
     }
-
-    fn max_seq(&self) -> Option<u64> {
-        self.seq.iter().copied().max()
-    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -278,7 +286,12 @@ impl MemTable {
         self.columns.clone()
     }
 
-    fn query(&self, query: &Query) -> Vec<(u64, Row)> {
+    fn query(&self, query: &Query, limit: Option<usize>) -> Vec<(u64, Row)> {
+        let limit = limit.unwrap_or(usize::MAX);
+        if limit == 0 {
+            return vec![];
+        }
+
         let mut candidate = initial_candidates_from_string_filters(
             self.columns.len(),
             query,
@@ -319,75 +332,410 @@ impl MemTable {
             candidate = Some(filtered);
         }
 
-        let row_ids = candidate.unwrap_or_else(|| (0..self.columns.len()).collect());
-        materialize_matches(&self.columns, query, row_ids)
+        let mut row_ids = candidate.unwrap_or_else(|| (0..self.columns.len()).collect());
+        row_ids.sort_unstable();
+        materialize_matches_desc(&self.columns, query, row_ids, limit)
     }
 }
 
-#[derive(Clone, Debug)]
-struct Segment {
-    id: u64,
-    path: PathBuf,
-    columns: ColumnStore,
-    index: SegmentIndex,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SegmentMeta {
+    row_count: usize,
+    min_seq: u64,
+    max_seq: u64,
+    min_x: i32,
+    max_x: i32,
+    min_y: i32,
+    max_y: i32,
+    min_z: i32,
+    max_z: i32,
+    min_time_ms: i64,
+    max_time_ms: i64,
 }
 
-impl Segment {
-    fn from_columns(id: u64, path: PathBuf, columns: ColumnStore) -> Self {
-        let index = SegmentIndex::build(&columns);
-        Self {
-            id,
-            path,
-            columns,
-            index,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SegmentCatalogEntry {
+    id: u64,
+    file_name: String,
+    meta: SegmentMeta,
+    #[serde(default)]
+    storage: Option<SegmentStorage>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+struct SegmentCatalog {
+    entries: Vec<SegmentCatalogEntry>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+enum SegmentStorage {
+    V2 {
+        index_offset: u64,
+        index_len: u64,
+        columns_offset: u64,
+        columns_len: u64,
+    },
+    Legacy,
+}
+
+impl SegmentStorage {
+    fn meta_len(&self) -> u64 {
+        match self {
+            Self::V2 { index_offset, .. } => index_offset.saturating_sub(SEGMENT_V2_HEADER_LEN),
+            Self::Legacy => 0,
         }
     }
+}
 
-    fn load(id: u64, path: PathBuf) -> Result<Self, DbError> {
-        let bytes = fs::read(&path)?;
-        let columns: ColumnStore = bincode::deserialize(&bytes)?;
-        Ok(Self::from_columns(id, path, columns))
+impl SegmentMeta {
+    fn from_columns(columns: &ColumnStore) -> Self {
+        debug_assert!(!columns.is_empty());
+        let mut min_seq = u64::MAX;
+        let mut max_seq = u64::MIN;
+        let mut min_x = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut min_y = i32::MAX;
+        let mut max_y = i32::MIN;
+        let mut min_z = i32::MAX;
+        let mut max_z = i32::MIN;
+        let mut min_time_ms = i64::MAX;
+        let mut max_time_ms = i64::MIN;
+
+        for row_id in 0..columns.len() {
+            min_seq = min_seq.min(columns.seq[row_id]);
+            max_seq = max_seq.max(columns.seq[row_id]);
+            min_x = min_x.min(columns.x[row_id]);
+            max_x = max_x.max(columns.x[row_id]);
+            min_y = min_y.min(columns.y[row_id]);
+            max_y = max_y.max(columns.y[row_id]);
+            min_z = min_z.min(columns.z[row_id]);
+            max_z = max_z.max(columns.z[row_id]);
+            min_time_ms = min_time_ms.min(columns.time_ms[row_id]);
+            max_time_ms = max_time_ms.max(columns.time_ms[row_id]);
+        }
+
+        Self {
+            row_count: columns.len(),
+            min_seq,
+            max_seq,
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+            min_z,
+            max_z,
+            min_time_ms,
+            max_time_ms,
+        }
     }
 
     fn max_seq(&self) -> Option<u64> {
-        self.columns.max_seq()
+        if self.row_count == 0 {
+            None
+        } else {
+            Some(self.max_seq)
+        }
     }
 
-    fn query(&self, query: &Query) -> Vec<(u64, Row)> {
-        let mut candidate = initial_candidates_from_string_filters(
-            self.columns.len(),
-            query,
-            &self.index.subject_index,
-            &self.index.object_index,
-            &self.index.verb_index,
-        );
-
-        if has_xyz_filter(query) {
-            let morton_ids = self.index.morton_candidates(query, &self.columns);
-            candidate = Some(intersect_sorted_vecs(
-                candidate.unwrap_or_else(|| (0..self.columns.len()).collect()),
-                morton_ids,
-            ));
+    fn may_match(&self, query: &Query) -> bool {
+        if self.row_count == 0 {
+            return false;
         }
 
-        if let Some(time_predicate) = query
-            .time_ms
-            .as_ref()
-            .filter(|predicate| predicate.is_effective())
-        {
-            let time_ids = self.index.time_candidates(time_predicate);
-            candidate = Some(intersect_sorted_vecs(
-                candidate.unwrap_or_else(|| (0..self.columns.len()).collect()),
-                time_ids,
-            ));
+        let x_ok = int_bounds(query.x.as_ref())
+            .is_none_or(|(min, max)| max >= self.min_x && min <= self.max_x);
+        if !x_ok {
+            return false;
         }
 
-        let row_ids = candidate.unwrap_or_else(|| (0..self.columns.len()).collect());
-        materialize_matches(&self.columns, query, row_ids)
+        let y_ok = int_bounds(query.y.as_ref())
+            .is_none_or(|(min, max)| max >= self.min_y && min <= self.max_y);
+        if !y_ok {
+            return false;
+        }
+
+        let z_ok = int_bounds(query.z.as_ref())
+            .is_none_or(|(min, max)| max >= self.min_z && min <= self.max_z);
+        if !z_ok {
+            return false;
+        }
+
+        long_bounds(query.time_ms.as_ref())
+            .is_none_or(|(min, max)| max >= self.min_time_ms && min <= self.max_time_ms)
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug)]
+struct Segment {
+    id: u64,
+    path: PathBuf,
+    meta: SegmentMeta,
+    storage: SegmentStorage,
+    columns_cache: RwLock<Option<Arc<ColumnStore>>>,
+    index_cache: RwLock<Option<Arc<SegmentIndex>>>,
+}
+
+impl Segment {
+    fn from_columns(
+        id: u64,
+        path: PathBuf,
+        columns: ColumnStore,
+        index: SegmentIndex,
+        storage: SegmentStorage,
+    ) -> Self {
+        let meta = SegmentMeta::from_columns(&columns);
+        Self {
+            id,
+            path,
+            meta,
+            storage,
+            columns_cache: RwLock::new(Some(Arc::new(columns))),
+            index_cache: RwLock::new(Some(Arc::new(index))),
+        }
+    }
+
+    fn from_catalog_entry(entry: SegmentCatalogEntry, path: PathBuf) -> Self {
+        Self {
+            id: entry.id,
+            path,
+            meta: entry.meta,
+            storage: entry.storage.unwrap_or(SegmentStorage::Legacy),
+            columns_cache: RwLock::new(None),
+            index_cache: RwLock::new(None),
+        }
+    }
+
+    fn catalog_entry(&self) -> Result<SegmentCatalogEntry, DbError> {
+        let file_name = self
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                DbError::CorruptedSegment(format!(
+                    "invalid utf-8 segment file name: {}",
+                    self.path.display()
+                ))
+            })?
+            .to_string();
+        Ok(SegmentCatalogEntry {
+            id: self.id,
+            file_name,
+            meta: self.meta.clone(),
+            storage: Some(self.storage),
+        })
+    }
+
+    fn load(id: u64, path: PathBuf) -> Result<Self, DbError> {
+        if let Some(storage) = read_segment_v2_storage(&path)? {
+            let meta_bytes =
+                read_segment_section(&path, SEGMENT_V2_HEADER_LEN, storage.meta_len())?;
+            let meta: SegmentMeta = bincode::deserialize(&meta_bytes)?;
+            return Ok(Self {
+                id,
+                path,
+                meta,
+                storage,
+                columns_cache: RwLock::new(None),
+                index_cache: RwLock::new(None),
+            });
+        }
+
+        let meta_path = segment_meta_path(&path);
+        if meta_path.exists() {
+            let meta_bytes = fs::read(&meta_path)?;
+            let meta: SegmentMeta = bincode::deserialize(&meta_bytes)?;
+            return Ok(Self {
+                id,
+                path,
+                meta,
+                storage: SegmentStorage::Legacy,
+                columns_cache: RwLock::new(None),
+                index_cache: RwLock::new(None),
+            });
+        }
+
+        // Legacy segment fallback: load once, build sidecar metadata/index for future lazy opens.
+        let bytes = fs::read(&path)?;
+        let columns: ColumnStore = bincode::deserialize(&bytes)?;
+        let index = SegmentIndex::build(&columns);
+        let meta = SegmentMeta::from_columns(&columns);
+        persist_segment_sidecars(&path, &meta, &index)?;
+
+        Ok(Self {
+            id,
+            path,
+            meta,
+            storage: SegmentStorage::Legacy,
+            columns_cache: RwLock::new(Some(Arc::new(columns))),
+            index_cache: RwLock::new(Some(Arc::new(index))),
+        })
+    }
+
+    fn max_seq(&self) -> Option<u64> {
+        self.meta.max_seq()
+    }
+
+    fn query(&self, query: &Query, limit: Option<usize>) -> Result<Vec<(u64, Row)>, DbError> {
+        let limit = limit.unwrap_or(usize::MAX);
+        if limit == 0 || !self.meta.may_match(query) {
+            return Ok(vec![]);
+        }
+
+        let columns = self.ensure_columns()?;
+        let mut candidate: Option<Vec<usize>> = None;
+        let needs_index = query.subject.is_some()
+            || query.object.is_some()
+            || query.verb.is_some()
+            || has_xyz_filter(query)
+            || query
+                .time_ms
+                .as_ref()
+                .is_some_and(LongPredicate::is_effective);
+
+        if needs_index {
+            let index = self.ensure_index(&columns)?;
+            candidate = initial_candidates_from_string_filters(
+                columns.len(),
+                query,
+                &index.subject_index,
+                &index.object_index,
+                &index.verb_index,
+            );
+
+            if has_xyz_filter(query) {
+                let morton_ids = index.morton_candidates(query, &columns);
+                candidate = Some(intersect_sorted_vecs(
+                    candidate.unwrap_or_else(|| (0..columns.len()).collect()),
+                    morton_ids,
+                ));
+            }
+
+            if let Some(time_predicate) = query
+                .time_ms
+                .as_ref()
+                .filter(|predicate| predicate.is_effective())
+            {
+                let time_ids = index.time_candidates(time_predicate);
+                candidate = Some(intersect_sorted_vecs(
+                    candidate.unwrap_or_else(|| (0..columns.len()).collect()),
+                    time_ids,
+                ));
+            }
+        }
+
+        let mut row_ids = candidate.unwrap_or_else(|| (0..columns.len()).collect());
+        row_ids.sort_unstable();
+        Ok(materialize_matches_desc(&columns, query, row_ids, limit))
+    }
+
+    fn all_rows(&self) -> Result<Vec<(u64, Row)>, DbError> {
+        let columns = self.ensure_columns()?;
+        Ok((0..columns.len())
+            .map(|row_id| (columns.seq[row_id], columns.row_at(row_id)))
+            .collect::<Vec<_>>())
+    }
+
+    fn ensure_columns(&self) -> Result<Arc<ColumnStore>, DbError> {
+        if let Some(columns) = self
+            .columns_cache
+            .read()
+            .map_err(|_| DbError::PoisonedLock)?
+            .as_ref()
+            .cloned()
+        {
+            return Ok(columns);
+        }
+
+        let columns: ColumnStore = match self.storage {
+            SegmentStorage::V2 {
+                columns_offset,
+                columns_len,
+                ..
+            } => {
+                let bytes = read_segment_section(&self.path, columns_offset, columns_len)?;
+                bincode::deserialize(&bytes)?
+            }
+            SegmentStorage::Legacy => {
+                let bytes = fs::read(&self.path)?;
+                bincode::deserialize(&bytes)?
+            }
+        };
+        let columns = Arc::new(columns);
+
+        let mut guard = self
+            .columns_cache
+            .write()
+            .map_err(|_| DbError::PoisonedLock)?;
+        if guard.is_none() {
+            *guard = Some(columns.clone());
+        }
+        Ok(guard.as_ref().expect("columns cache should be set").clone())
+    }
+
+    fn ensure_index(&self, columns: &ColumnStore) -> Result<Arc<SegmentIndex>, DbError> {
+        if let Some(index) = self
+            .index_cache
+            .read()
+            .map_err(|_| DbError::PoisonedLock)?
+            .as_ref()
+            .cloned()
+        {
+            return Ok(index);
+        }
+
+        let index = match self.storage {
+            SegmentStorage::V2 {
+                index_offset,
+                index_len,
+                ..
+            } => {
+                if index_len > 0 {
+                    let bytes = read_segment_section(&self.path, index_offset, index_len)?;
+                    bincode::deserialize::<SegmentIndex>(&bytes)?
+                } else {
+                    let idx_path = segment_index_path(&self.path);
+                    if idx_path.exists() {
+                        let bytes = fs::read(&idx_path)?;
+                        bincode::deserialize::<SegmentIndex>(&bytes)?
+                    } else {
+                        let built = SegmentIndex::build(columns);
+                        if let Some(parent) = idx_path.parent() {
+                            fs::create_dir_all(parent)?;
+                        }
+                        persist_segment_index(&idx_path, &built)?;
+                        built
+                    }
+                }
+            }
+            SegmentStorage::Legacy => {
+                let idx_path = segment_index_path(&self.path);
+                if idx_path.exists() {
+                    let bytes = fs::read(&idx_path)?;
+                    bincode::deserialize::<SegmentIndex>(&bytes)?
+                } else {
+                    let built = SegmentIndex::build(columns);
+                    if let Some(parent) = idx_path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    persist_segment_index(&idx_path, &built)?;
+                    built
+                }
+            }
+        };
+        let index = Arc::new(index);
+
+        let mut guard = self
+            .index_cache
+            .write()
+            .map_err(|_| DbError::PoisonedLock)?;
+        if guard.is_none() {
+            *guard = Some(index.clone());
+        }
+        Ok(guard.as_ref().expect("index cache should be set").clone())
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct SegmentIndex {
     subject_index: HashMap<String, Vec<usize>>,
     object_index: HashMap<String, Vec<usize>>,
@@ -612,8 +960,15 @@ impl SpaceLoggerDb {
         let segments_dir = db_dir.join("segments");
         fs::create_dir_all(&segments_dir)?;
 
-        let mut segments = load_segments(&segments_dir)?;
-        segments.sort_unstable_by_key(|segment| segment.id);
+        let mut segments = match load_segment_catalog(&db_dir, &segments_dir)? {
+            Some(segments) => segments,
+            None => {
+                let loaded = load_segments(&segments_dir)?;
+                persist_segment_catalog(&db_dir, &loaded)?;
+                loaded
+            }
+        };
+        sort_segments_by_seq(&mut segments);
 
         let max_segment_id = segments.iter().map(|segment| segment.id).max().unwrap_or(0);
         let max_segment_seq = segments
@@ -713,50 +1068,35 @@ impl SpaceLoggerDb {
         if !state.memtable.is_empty() {
             self.flush_locked(&mut state)?;
         }
-        if state.segments.len() <= 1 {
-            return Ok(());
-        }
-
-        let old_paths = state
-            .segments
-            .iter()
-            .map(|segment| segment.path.clone())
-            .collect::<Vec<_>>();
-
-        let merged_columns = merge_segments_columns(&state.segments);
-        let new_segment_id = state.next_segment_id;
-        let new_segment_path = self
-            .segments_dir
-            .join(format!("segment_{new_segment_id}.bin"));
-
-        persist_segment(&new_segment_path, &merged_columns)?;
-        for path in &old_paths {
-            if let Err(err) = fs::remove_file(path) {
-                if err.kind() != ErrorKind::NotFound {
-                    return Err(DbError::Io(err));
-                }
-            }
-        }
-
-        let merged_segment =
-            Segment::from_columns(new_segment_id, new_segment_path, merged_columns);
-        state.segments = vec![merged_segment];
-        state.next_segment_id += 1;
-
-        Ok(())
+        self.compact_all_locked(&mut state)
     }
 
     pub fn query(&self, query: &Query, limit: Option<usize>) -> Result<Vec<Row>, DbError> {
+        let limit = limit.unwrap_or(usize::MAX);
+        if limit == 0 {
+            return Ok(vec![]);
+        }
+
         let state = self.state.read().map_err(|_| DbError::PoisonedLock)?;
 
-        let mut rows_with_seq = Vec::new();
-        for segment in &state.segments {
-            rows_with_seq.extend(segment.query(query));
+        let mut rows_with_seq = state.memtable.query(query, Some(limit));
+        if rows_with_seq.len() >= limit {
+            rows_with_seq.truncate(limit);
+            return Ok(rows_with_seq
+                .into_iter()
+                .map(|(_, row)| row)
+                .collect::<Vec<_>>());
         }
-        rows_with_seq.extend(state.memtable.query(query));
 
-        rows_with_seq.sort_unstable_by(|(left_seq, _), (right_seq, _)| right_seq.cmp(left_seq));
-        let limit = limit.unwrap_or(rows_with_seq.len());
+        let mut remaining = limit.saturating_sub(rows_with_seq.len());
+        for segment in state.segments.iter().rev() {
+            if remaining == 0 {
+                break;
+            }
+            let mut matched = segment.query(query, Some(remaining))?;
+            remaining = remaining.saturating_sub(matched.len());
+            rows_with_seq.append(&mut matched);
+        }
 
         Ok(rows_with_seq
             .into_iter()
@@ -781,11 +1121,11 @@ impl SpaceLoggerDb {
         let mut kept_rows = Vec::new();
         let mut deleted = 0usize;
         for segment in &state.segments {
-            for row_id in 0..segment.columns.len() {
-                if row_id_matches_query(&segment.columns, row_id, query) {
+            for (seq, row) in segment.all_rows()? {
+                if row_matches_query(&row, query) {
                     deleted += 1;
                 } else {
-                    kept_rows.push((segment.columns.seq[row_id], segment.columns.row_at(row_id)));
+                    kept_rows.push((seq, row));
                 }
             }
         }
@@ -795,11 +1135,7 @@ impl SpaceLoggerDb {
         }
 
         for path in &old_paths {
-            if let Err(err) = fs::remove_file(path) {
-                if err.kind() != ErrorKind::NotFound {
-                    return Err(DbError::Io(err));
-                }
-            }
+            remove_segment_family(path)?;
         }
 
         kept_rows.sort_unstable_by_key(|(seq, _)| *seq);
@@ -811,16 +1147,20 @@ impl SpaceLoggerDb {
             for (seq, row) in kept_rows {
                 columns.push(seq, &row);
             }
+            columns =
+                enforce_same_location_kill_limit(columns, self.options.same_location_kill_limit);
+            let index = SegmentIndex::build(&columns);
 
             let segment_id = state.next_segment_id;
             let path = self.segments_dir.join(format!("segment_{segment_id}.bin"));
-            persist_segment(&path, &columns)?;
+            let storage = persist_segment(&path, &columns, &index)?;
 
-            state
-                .segments
-                .push(Segment::from_columns(segment_id, path, columns));
+            state.segments.push(Segment::from_columns(
+                segment_id, path, columns, index, storage,
+            ));
             state.next_segment_id += 1;
         }
+        persist_segment_catalog(&self.db_dir, &state.segments)?;
 
         Ok(deleted)
     }
@@ -842,39 +1182,228 @@ impl SpaceLoggerDb {
         let segment_id = state.next_segment_id;
         let path = self.segments_dir.join(format!("segment_{segment_id}.bin"));
         let columns = state.memtable.to_column_store();
+        let index = SegmentIndex::build(&columns);
 
-        persist_segment(&path, &columns)?;
+        let storage = persist_segment(&path, &columns, &index)?;
 
-        let segment = Segment::from_columns(segment_id, path, columns);
+        let segment = Segment::from_columns(segment_id, path, columns, index, storage);
         state.segments.push(segment);
+        sort_segments_by_seq(&mut state.segments);
         state.next_segment_id += 1;
         state.memtable.clear();
         state.wal.truncate()?;
+        if self.options.enable_background_maintenance {
+            self.maybe_auto_compact_locked(state)?;
+        }
+        persist_segment_catalog(&self.db_dir, &state.segments)?;
 
+        Ok(())
+    }
+
+    fn compact_all_locked(&self, state: &mut DbState) -> Result<(), DbError> {
+        if state.segments.len() <= 1 {
+            return Ok(());
+        }
+
+        let old_paths = state
+            .segments
+            .iter()
+            .map(|segment| segment.path.clone())
+            .collect::<Vec<_>>();
+
+        let merged_columns = enforce_same_location_kill_limit(
+            merge_segments_columns(&state.segments)?,
+            self.options.same_location_kill_limit,
+        );
+        let merged_index = SegmentIndex::build(&merged_columns);
+        let new_segment_id = state.next_segment_id;
+        let new_segment_path = self
+            .segments_dir
+            .join(format!("segment_{new_segment_id}.bin"));
+
+        let storage = persist_segment(&new_segment_path, &merged_columns, &merged_index)?;
+        for path in &old_paths {
+            remove_segment_family(path)?;
+        }
+
+        let merged_segment = Segment::from_columns(
+            new_segment_id,
+            new_segment_path,
+            merged_columns,
+            merged_index,
+            storage,
+        );
+        state.segments = vec![merged_segment];
+        state.next_segment_id += 1;
+        sort_segments_by_seq(&mut state.segments);
+        persist_segment_catalog(&self.db_dir, &state.segments)?;
+        Ok(())
+    }
+
+    fn maybe_auto_compact_locked(&self, state: &mut DbState) -> Result<(), DbError> {
+        if state.segments.len() <= AUTO_COMPACTION_TRIGGER_SEGMENTS {
+            return Ok(());
+        }
+
+        sort_segments_by_seq(&mut state.segments);
+        let take_count = state
+            .segments
+            .len()
+            .min(AUTO_COMPACTION_BATCH_SEGMENTS.max(2));
+        if take_count <= 1 {
+            return Ok(());
+        }
+
+        let to_merge = state.segments.drain(0..take_count).collect::<Vec<_>>();
+        let old_paths = to_merge
+            .iter()
+            .map(|segment| segment.path.clone())
+            .collect::<Vec<_>>();
+
+        let merged_columns = enforce_same_location_kill_limit(
+            merge_segments_columns(&to_merge)?,
+            self.options.same_location_kill_limit,
+        );
+        let merged_index = SegmentIndex::build(&merged_columns);
+        let new_segment_id = state.next_segment_id;
+        let new_segment_path = self
+            .segments_dir
+            .join(format!("segment_{new_segment_id}.bin"));
+        let storage = persist_segment(&new_segment_path, &merged_columns, &merged_index)?;
+        for path in &old_paths {
+            remove_segment_family(path)?;
+        }
+
+        state.segments.push(Segment::from_columns(
+            new_segment_id,
+            new_segment_path,
+            merged_columns,
+            merged_index,
+            storage,
+        ));
+        state.next_segment_id += 1;
+        sort_segments_by_seq(&mut state.segments);
         Ok(())
     }
 }
 
-fn persist_segment(path: &Path, columns: &ColumnStore) -> Result<(), DbError> {
+fn persist_segment(
+    path: &Path,
+    columns: &ColumnStore,
+    index: &SegmentIndex,
+) -> Result<SegmentStorage, DbError> {
+    let meta = SegmentMeta::from_columns(columns);
+    let meta_bytes = bincode::serialize(&meta)?;
+    let columns_bytes = bincode::serialize(columns)?;
+
+    let meta_len = meta_bytes.len() as u64;
+    let index_len = 0u64;
+    let columns_len = columns_bytes.len() as u64;
+    let index_offset = SEGMENT_V2_HEADER_LEN + meta_len;
+    let columns_offset = index_offset + index_len;
+
     let file = OpenOptions::new()
         .create(true)
         .truncate(true)
         .write(true)
         .open(path)?;
     let mut writer = BufWriter::new(file);
-    let bytes = bincode::serialize(columns)?;
-    writer.write_all(&bytes)?;
+    writer.write_all(&SEGMENT_V2_MAGIC)?;
+    writer.write_all(&2u32.to_le_bytes())?;
+    writer.write_all(&meta_len.to_le_bytes())?;
+    writer.write_all(&index_len.to_le_bytes())?;
+    writer.write_all(&columns_len.to_le_bytes())?;
+    writer.write_all(&meta_bytes)?;
+    writer.write_all(&columns_bytes)?;
     writer.flush()?;
     writer.get_ref().sync_data()?;
-    Ok(())
+
+    let idx_path = preferred_segment_index_path(path);
+    if let Some(parent) = idx_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    persist_segment_index(&idx_path, index)?;
+
+    Ok(SegmentStorage::V2 {
+        index_offset,
+        index_len,
+        columns_offset,
+        columns_len,
+    })
 }
 
-fn merge_segments_columns(segments: &[Segment]) -> ColumnStore {
+fn read_segment_v2_storage(path: &Path) -> Result<Option<SegmentStorage>, DbError> {
+    let mut file = File::open(path)?;
+    let mut header = [0u8; SEGMENT_V2_HEADER_LEN as usize];
+    match file.read_exact(&mut header) {
+        Ok(()) => {}
+        Err(err) if err.kind() == ErrorKind::UnexpectedEof => return Ok(None),
+        Err(err) => return Err(DbError::Io(err)),
+    }
+
+    let magic: [u8; 8] = header[0..8]
+        .try_into()
+        .map_err(|_| DbError::CorruptedSegment("invalid segment magic header".to_string()))?;
+    if magic != SEGMENT_V2_MAGIC {
+        return Ok(None);
+    }
+
+    let version =
+        u32::from_le_bytes(header[8..12].try_into().map_err(|_| {
+            DbError::CorruptedSegment("invalid segment version header".to_string())
+        })?);
+    if version != 2 {
+        return Err(DbError::CorruptedSegment(format!(
+            "unsupported segment version: {version}"
+        )));
+    }
+
+    let meta_len = u64::from_le_bytes(header[12..20].try_into().map_err(|_| {
+        DbError::CorruptedSegment("invalid segment meta length header".to_string())
+    })?);
+    let index_len = u64::from_le_bytes(header[20..28].try_into().map_err(|_| {
+        DbError::CorruptedSegment("invalid segment index length header".to_string())
+    })?);
+    let columns_len = u64::from_le_bytes(header[28..36].try_into().map_err(|_| {
+        DbError::CorruptedSegment("invalid segment columns length header".to_string())
+    })?);
+
+    let index_offset = SEGMENT_V2_HEADER_LEN + meta_len;
+    let columns_offset = index_offset + index_len;
+    let expected_min_len = columns_offset + columns_len;
+    let actual_len = file.metadata()?.len();
+    if actual_len < expected_min_len {
+        return Err(DbError::CorruptedSegment(format!(
+            "segment truncated: expected at least {expected_min_len} bytes, got {actual_len}"
+        )));
+    }
+
+    Ok(Some(SegmentStorage::V2 {
+        index_offset,
+        index_len,
+        columns_offset,
+        columns_len,
+    }))
+}
+
+fn read_segment_section(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, DbError> {
+    if len > usize::MAX as u64 {
+        return Err(DbError::CorruptedSegment(format!(
+            "segment section too large to allocate: {len}"
+        )));
+    }
+
+    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(offset))?;
+    let mut bytes = vec![0u8; len as usize];
+    file.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn merge_segments_columns(segments: &[Segment]) -> Result<ColumnStore, DbError> {
     let mut rows = Vec::new();
     for segment in segments {
-        for row_id in 0..segment.columns.len() {
-            rows.push((segment.columns.seq[row_id], segment.columns.row_at(row_id)));
-        }
+        rows.extend(segment.all_rows()?);
     }
     rows.sort_unstable_by_key(|(seq, _)| *seq);
 
@@ -882,7 +1411,106 @@ fn merge_segments_columns(segments: &[Segment]) -> ColumnStore {
     for (seq, row) in rows {
         merged.push(seq, &row);
     }
-    merged
+    Ok(merged)
+}
+
+fn enforce_same_location_kill_limit(columns: ColumnStore, limit: usize) -> ColumnStore {
+    if limit == 0 || columns.is_empty() {
+        return columns;
+    }
+
+    let mut keep = vec![true; columns.len()];
+    let mut per_location_object = HashMap::<(i32, i32, i32, String), usize>::new();
+
+    for row_id in (0..columns.len()).rev() {
+        if columns.verb[row_id] != "kill" {
+            continue;
+        }
+        let key = (
+            columns.x[row_id],
+            columns.y[row_id],
+            columns.z[row_id],
+            columns.object[row_id].clone(),
+        );
+        let count = per_location_object.entry(key).or_insert(0);
+        if *count >= limit {
+            keep[row_id] = false;
+        } else {
+            *count += 1;
+        }
+    }
+
+    if keep.iter().all(|v| *v) {
+        return columns;
+    }
+
+    let mut filtered = ColumnStore::default();
+    for row_id in 0..columns.len() {
+        if keep[row_id] {
+            filtered.seq.push(columns.seq[row_id]);
+            filtered.x.push(columns.x[row_id]);
+            filtered.y.push(columns.y[row_id]);
+            filtered.z.push(columns.z[row_id]);
+            filtered.subject.push(columns.subject[row_id].clone());
+            filtered.object.push(columns.object[row_id].clone());
+            filtered.verb.push(columns.verb[row_id].clone());
+            filtered.time_ms.push(columns.time_ms[row_id]);
+            filtered
+                .subject_extra
+                .push(columns.subject_extra[row_id].clone());
+            filtered.data.push(columns.data[row_id].clone());
+        }
+    }
+    filtered
+}
+
+fn sort_segments_by_seq(segments: &mut [Segment]) {
+    segments.sort_unstable_by_key(|segment| (segment.max_seq().unwrap_or(0), segment.id));
+}
+
+fn segment_catalog_path(db_dir: &Path) -> PathBuf {
+    db_dir.join("segment_catalog.bin")
+}
+
+fn persist_segment_catalog(db_dir: &Path, segments: &[Segment]) -> Result<(), DbError> {
+    let entries = segments
+        .iter()
+        .map(Segment::catalog_entry)
+        .collect::<Result<Vec<_>, _>>()?;
+    let payload = bincode::serialize(&SegmentCatalog { entries })?;
+
+    let path = segment_catalog_path(db_dir);
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(path)?;
+    let mut writer = BufWriter::new(file);
+    writer.write_all(&payload)?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn load_segment_catalog(
+    db_dir: &Path,
+    segments_dir: &Path,
+) -> Result<Option<Vec<Segment>>, DbError> {
+    let path = segment_catalog_path(db_dir);
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let bytes = fs::read(path)?;
+    let catalog: SegmentCatalog = bincode::deserialize(&bytes)?;
+    let mut segments = Vec::with_capacity(catalog.entries.len());
+    for entry in catalog.entries {
+        let segment_path = segments_dir.join(&entry.file_name);
+        if !segment_path.exists() {
+            return Ok(None);
+        }
+        segments.push(Segment::from_catalog_entry(entry, segment_path));
+    }
+    Ok(Some(segments))
 }
 
 fn load_segments(segments_dir: &Path) -> Result<Vec<Segment>, DbError> {
@@ -917,6 +1545,125 @@ fn parse_segment_id(file_name: &str) -> Option<u64> {
         .trim_start_matches("segment_")
         .trim_end_matches(".bin");
     raw_id.parse::<u64>().ok()
+}
+
+fn sidecar_root(segment_path: &Path) -> PathBuf {
+    let segment_dir = segment_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    segment_dir
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
+}
+
+fn segment_stem(segment_path: &Path) -> String {
+    segment_path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("segment")
+        .to_string()
+}
+
+fn preferred_segment_meta_path(segment_path: &Path) -> PathBuf {
+    sidecar_root(segment_path)
+        .join("segment_meta")
+        .join(format!("{}.meta", segment_stem(segment_path)))
+}
+
+fn preferred_segment_index_path(segment_path: &Path) -> PathBuf {
+    sidecar_root(segment_path)
+        .join("segment_index")
+        .join(format!("{}.idx", segment_stem(segment_path)))
+}
+
+fn legacy_segment_meta_path(segment_path: &Path) -> PathBuf {
+    segment_path.with_extension("meta")
+}
+
+fn legacy_segment_index_path(segment_path: &Path) -> PathBuf {
+    segment_path.with_extension("idx")
+}
+
+fn segment_meta_path(segment_path: &Path) -> PathBuf {
+    let preferred = preferred_segment_meta_path(segment_path);
+    if preferred.exists() {
+        preferred
+    } else {
+        let legacy = legacy_segment_meta_path(segment_path);
+        if legacy.exists() { legacy } else { preferred }
+    }
+}
+
+fn segment_index_path(segment_path: &Path) -> PathBuf {
+    let preferred = preferred_segment_index_path(segment_path);
+    if preferred.exists() {
+        preferred
+    } else {
+        let legacy = legacy_segment_index_path(segment_path);
+        if legacy.exists() { legacy } else { preferred }
+    }
+}
+
+fn persist_segment_index(index_path: &Path, index: &SegmentIndex) -> Result<(), DbError> {
+    if let Some(parent) = index_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(index_path)?;
+    let mut writer = BufWriter::new(file);
+    let bytes = bincode::serialize(index)?;
+    writer.write_all(&bytes)?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn persist_segment_sidecars(
+    segment_path: &Path,
+    meta: &SegmentMeta,
+    index: &SegmentIndex,
+) -> Result<(), DbError> {
+    let meta_path = preferred_segment_meta_path(segment_path);
+    if let Some(parent) = meta_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&meta_path)?;
+    let mut writer = BufWriter::new(file);
+    let bytes = bincode::serialize(meta)?;
+    writer.write_all(&bytes)?;
+    writer.flush()?;
+    drop(writer);
+
+    let idx_path = preferred_segment_index_path(segment_path);
+    if let Some(parent) = idx_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    persist_segment_index(&idx_path, index)
+}
+
+fn remove_segment_family(segment_path: &Path) -> Result<(), DbError> {
+    for path in [
+        segment_path.to_path_buf(),
+        preferred_segment_meta_path(segment_path),
+        preferred_segment_index_path(segment_path),
+        legacy_segment_meta_path(segment_path),
+        legacy_segment_index_path(segment_path),
+    ] {
+        if let Err(err) = fs::remove_file(&path) {
+            if err.kind() != ErrorKind::NotFound {
+                return Err(DbError::Io(err));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn initial_candidates_from_string_filters(
@@ -955,16 +1702,27 @@ fn initial_candidates_from_string_filters(
     candidate
 }
 
-fn materialize_matches(
+fn materialize_matches_desc(
     columns: &ColumnStore,
     query: &Query,
-    row_ids: Vec<usize>,
+    mut row_ids: Vec<usize>,
+    limit: usize,
 ) -> Vec<(u64, Row)> {
-    row_ids
-        .into_iter()
-        .filter(|row_id| row_id_matches_query(columns, *row_id, query))
-        .map(|row_id| (columns.seq[row_id], columns.row_at(row_id)))
-        .collect::<Vec<_>>()
+    if limit == 0 {
+        return vec![];
+    }
+
+    row_ids.sort_unstable();
+    let mut matched = Vec::new();
+    for row_id in row_ids.into_iter().rev() {
+        if row_id_matches_query(columns, row_id, query) {
+            matched.push((columns.seq[row_id], columns.row_at(row_id)));
+            if matched.len() >= limit {
+                break;
+            }
+        }
+    }
+    matched
 }
 
 fn row_id_matches_query(columns: &ColumnStore, row_id: usize, query: &Query) -> bool {
@@ -984,6 +1742,22 @@ fn row_id_matches_query(columns: &ColumnStore, row_id: usize, query: &Query) -> 
             .verb
             .as_ref()
             .is_none_or(|verb| columns.verb[row_id] == *verb)
+}
+
+fn row_matches_query(row: &Row, query: &Query) -> bool {
+    matches_int(row.x, query.x.as_ref())
+        && matches_int(row.y, query.y.as_ref())
+        && matches_int(row.z, query.z.as_ref())
+        && matches_long(row.time_ms, query.time_ms.as_ref())
+        && query
+            .subject
+            .as_ref()
+            .is_none_or(|subject| row.subject == *subject)
+        && query
+            .object
+            .as_ref()
+            .is_none_or(|object| row.object == *object)
+        && query.verb.as_ref().is_none_or(|verb| row.verb == *verb)
 }
 
 fn matches_int(value: i32, predicate: Option<&IntPredicate>) -> bool {

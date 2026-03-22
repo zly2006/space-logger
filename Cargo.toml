@@ -14,3 +14,7 @@ criterion = "0.8.2"
 [[bench]]
 name = "olap_bench"
 harness = false
+
+[[bench]]
+name = "query_perf_bench"
+harness = false

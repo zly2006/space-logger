@@ -15,6 +15,12 @@ struct Cli {
     #[arg(long, default_value_t = 4096)]
     memtable_flush_rows: usize,
 
+    #[arg(long, default_value_t = 50)]
+    same_location_kill_limit: usize,
+
+    #[arg(long, default_value_t = true)]
+    enable_background_maintenance: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -86,6 +92,8 @@ fn run() -> Result<(), CliError> {
         &cli.db,
         DbOptions {
             memtable_flush_rows: cli.memtable_flush_rows,
+            same_location_kill_limit: cli.same_location_kill_limit,
+            enable_background_maintenance: cli.enable_background_maintenance,
         },
     )?;
 

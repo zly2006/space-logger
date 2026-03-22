@@ -21,6 +21,9 @@
 - 删除与压缩
   - `delete` 支持按查询条件删除。
   - `compact` 可手动合并多个段，降低读 fan-out。
+- 面向 MC 场景的击杀记录治理
+  - 支持“同一 `x/y/z` 地点 + 同一实体类型（`object`）的 `verb=kill` 记录上限”策略（默认 `50`）。
+  - 策略在 compaction/merge 过程中保留每个 `(x,y,z,object)` 键的最新记录，压掉旧记录。
 
 ## 数据模型
 
@@ -133,6 +136,8 @@ cargo run -- --db ./data compact
 
 - `--db <path>`：数据库目录（默认 `./space-logger-data`）
 - `--memtable-flush-rows <n>`：内存表 flush 阈值（默认 `4096`）
+- `--same-location-kill-limit <n>`：同地点 + 同 `object` 的击杀记录上限（默认 `50`）
+- `--enable-background-maintenance <bool>`：是否启用后台维护（自动 compaction 等，默认 `true`）
 
 ## 开发与验证
 
@@ -156,7 +161,7 @@ cargo test
 ### 基准测试
 
 ```bash
-cargo bench --bench olap_bench -- --noplot
+cargo bench --bench olap_bench --bench query_perf_bench -- --noplot
 ```
 
 ## 注意事项

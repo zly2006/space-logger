@@ -1,7 +1,12 @@
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use space_logger::{DbOptions, IntPredicate, LongPredicate, Query, Row, SpaceLoggerDb};
+
+const SEGMENT_V2_MAGIC: [u8; 8] = *b"SLSEGv2\0";
+const SEGMENT_V2_HEADER_LEN: usize = 36;
 
 fn sample_row(seed: i32) -> Row {
     Row {
@@ -137,6 +142,61 @@ fn fresh_db_dir(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("space_logger_{name}_{ts}"))
 }
 
+fn segment_magic(path: &Path) -> [u8; 8] {
+    let bytes = std::fs::read(path).expect("segment should be readable");
+    bytes[0..8]
+        .try_into()
+        .expect("segment header should include 8-byte magic")
+}
+
+fn convert_segment_v2_to_legacy(path: &Path) {
+    let bytes = std::fs::read(path).expect("segment should be readable");
+    assert!(
+        bytes.len() >= SEGMENT_V2_HEADER_LEN,
+        "segment should include V2 header"
+    );
+    let magic: [u8; 8] = bytes[0..8]
+        .try_into()
+        .expect("segment magic slice should be 8 bytes");
+    assert_eq!(
+        magic, SEGMENT_V2_MAGIC,
+        "expected V2 segment before downgrade"
+    );
+
+    let meta_len = u64::from_le_bytes(
+        bytes[12..20]
+            .try_into()
+            .expect("meta length bytes should exist"),
+    ) as usize;
+    let index_len = u64::from_le_bytes(
+        bytes[20..28]
+            .try_into()
+            .expect("index length bytes should exist"),
+    ) as usize;
+    let columns_len = u64::from_le_bytes(
+        bytes[28..36]
+            .try_into()
+            .expect("columns length bytes should exist"),
+    ) as usize;
+    let columns_offset = SEGMENT_V2_HEADER_LEN + meta_len + index_len;
+    let columns_end = columns_offset + columns_len;
+    assert!(
+        columns_end <= bytes.len(),
+        "v2 segment payload should contain complete columns block"
+    );
+
+    let legacy_payload = &bytes[columns_offset..columns_end];
+    let mut file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .expect("segment should be writable");
+    file.write_all(legacy_payload)
+        .expect("legacy payload write should succeed");
+    file.sync_data()
+        .expect("legacy payload fsync should succeed");
+}
+
 #[test]
 fn wal_recover_after_reopen() {
     let db_dir = fresh_db_dir("wal_recover_after_reopen");
@@ -146,6 +206,7 @@ fn wal_recover_after_reopen() {
             &db_dir,
             DbOptions {
                 memtable_flush_rows: 1024,
+                ..DbOptions::default()
             },
         )
         .expect("open should succeed");
@@ -168,6 +229,7 @@ fn wal_recover_after_reopen() {
             &db_dir,
             DbOptions {
                 memtable_flush_rows: 1024,
+                ..DbOptions::default()
             },
         )
         .expect("reopen should recover");
@@ -193,6 +255,7 @@ fn lsm_flush_creates_segment_and_query_hits_persisted_data() {
         &db_dir,
         DbOptions {
             memtable_flush_rows: 2,
+            ..DbOptions::default()
         },
     )
     .expect("open should succeed");
@@ -234,6 +297,7 @@ fn optimistic_lock_rejects_stale_write() {
         &db_dir,
         DbOptions {
             memtable_flush_rows: 1024,
+            ..DbOptions::default()
         },
     )
     .expect("open should succeed");
@@ -266,6 +330,7 @@ fn range_query_uses_xyz_and_time_filters() {
         &db_dir,
         DbOptions {
             memtable_flush_rows: 3,
+            ..DbOptions::default()
         },
     )
     .expect("open should succeed");
@@ -333,6 +398,7 @@ fn query_returns_latest_first_and_respects_limit() {
         &db_dir,
         DbOptions {
             memtable_flush_rows: 1024,
+            ..DbOptions::default()
         },
     )
     .expect("open should succeed");
@@ -397,6 +463,7 @@ fn flush_truncates_wal_and_reopen_can_read_segment_data() {
             &db_dir,
             DbOptions {
                 memtable_flush_rows: 1024,
+                ..DbOptions::default()
             },
         )
         .expect("open should succeed");
@@ -438,6 +505,7 @@ fn flush_truncates_wal_and_reopen_can_read_segment_data() {
             &db_dir,
             DbOptions {
                 memtable_flush_rows: 1024,
+                ..DbOptions::default()
             },
         )
         .expect("reopen should succeed");
@@ -465,6 +533,7 @@ fn batch_insert_appends_multiple_rows_and_enforces_optimistic_lock() {
         &db_dir,
         DbOptions {
             memtable_flush_rows: 1024,
+            ..DbOptions::default()
         },
     )
     .expect("open should succeed");
@@ -509,6 +578,7 @@ fn manual_compaction_merges_segments_and_preserves_query_results() {
         &db_dir,
         DbOptions {
             memtable_flush_rows: 1,
+            ..DbOptions::default()
         },
     )
     .expect("open should succeed");
@@ -568,6 +638,7 @@ fn delete_where_removes_rows_and_returns_zero_for_non_matching_delete() {
         &db_dir,
         DbOptions {
             memtable_flush_rows: 8,
+            ..DbOptions::default()
         },
     )
     .expect("open should succeed");
@@ -616,6 +687,7 @@ fn filter_logic_matches_reference_implementation_with_500_plus_rows() {
         &db_dir,
         DbOptions {
             memtable_flush_rows: 64,
+            ..DbOptions::default()
         },
     )
     .expect("open should succeed");
@@ -702,6 +774,415 @@ fn filter_logic_matches_reference_implementation_with_500_plus_rows() {
         0,
         "last query should be failure case with no matched rows"
     );
+
+    std::fs::remove_dir_all(db_dir).ok();
+}
+
+#[test]
+fn flush_writes_segment_v2_for_lazy_open() {
+    let db_dir = fresh_db_dir("flush_writes_segment_v2_for_lazy_open");
+    let db = SpaceLoggerDb::open(
+        &db_dir,
+        DbOptions {
+            memtable_flush_rows: 4,
+            ..DbOptions::default()
+        },
+    )
+    .expect("open should succeed");
+
+    for seed in 0..8 {
+        let version = db.current_version();
+        db.insert_with_version(sample_row(seed), version)
+            .expect("insert should succeed");
+    }
+    db.flush().expect("flush should succeed");
+
+    let segments_dir = db_dir.join("segments");
+    let data_path = segments_dir.join("segment_1.bin");
+    let meta_path = db_dir.join("segment_meta").join("segment_1.meta");
+    let index_path = db_dir.join("segment_index").join("segment_1.idx");
+
+    assert!(data_path.exists(), "data segment should exist");
+    assert_eq!(
+        segment_magic(&data_path),
+        SEGMENT_V2_MAGIC,
+        "newly flushed segment should use V2 file format"
+    );
+    assert!(
+        !meta_path.exists(),
+        "v2 segment should not require external meta sidecar"
+    );
+    assert!(
+        index_path.exists(),
+        "v2 writer should persist index sidecar for fast reopen query planning"
+    );
+
+    let success = db
+        .query(&query_by_subject("subject-6"), Some(1))
+        .expect("query should succeed");
+    assert_eq!(success.len(), 1, "success case should return one row");
+
+    let fail = db
+        .query(&no_match_query(), Some(1))
+        .expect("query should work");
+    assert_eq!(fail.len(), 0, "failure case should have no rows");
+
+    std::fs::remove_dir_all(db_dir).ok();
+}
+
+#[test]
+fn query_limit_across_segments_keeps_global_newest_order() {
+    let db_dir = fresh_db_dir("query_limit_across_segments_keeps_global_newest_order");
+    let db = SpaceLoggerDb::open(
+        &db_dir,
+        DbOptions {
+            memtable_flush_rows: 1,
+            ..DbOptions::default()
+        },
+    )
+    .expect("open should succeed");
+
+    for seed in 0..10 {
+        let version = db.current_version();
+        db.insert_with_version(sample_row(seed), version)
+            .expect("insert should succeed");
+    }
+
+    let rows = db
+        .query(&Query::default(), Some(4))
+        .expect("query should succeed");
+    let subjects = rows.into_iter().map(|row| row.subject).collect::<Vec<_>>();
+    assert_eq!(
+        subjects,
+        vec![
+            "subject-9".to_string(),
+            "subject-8".to_string(),
+            "subject-7".to_string(),
+            "subject-6".to_string(),
+        ],
+        "limit query should remain globally newest-first across many segments"
+    );
+
+    let fail = db
+        .query(&no_match_query(), Some(4))
+        .expect("query should work");
+    assert_eq!(fail.len(), 0, "failure case should have no rows");
+
+    std::fs::remove_dir_all(db_dir).ok();
+}
+
+#[test]
+fn legacy_segment_without_sidecars_is_still_readable_after_reopen() {
+    let db_dir = fresh_db_dir("legacy_segment_without_sidecars_is_still_readable_after_reopen");
+
+    {
+        let db = SpaceLoggerDb::open(
+            &db_dir,
+            DbOptions {
+                memtable_flush_rows: 4,
+                ..DbOptions::default()
+            },
+        )
+        .expect("open should succeed");
+
+        for seed in 0..10 {
+            let version = db.current_version();
+            db.insert_with_version(sample_row(seed), version)
+                .expect("insert should succeed");
+        }
+        db.flush().expect("flush should succeed");
+    }
+
+    let segment_path = db_dir.join("segments").join("segment_1.bin");
+    assert!(segment_path.exists(), "segment file should exist");
+    convert_segment_v2_to_legacy(&segment_path);
+    assert_ne!(
+        segment_magic(&segment_path),
+        SEGMENT_V2_MAGIC,
+        "legacy downgraded segment should no longer expose V2 magic"
+    );
+
+    std::fs::remove_file(db_dir.join("segment_catalog.bin")).ok();
+    std::fs::remove_file(db_dir.join("segment_meta").join("segment_1.meta")).ok();
+    std::fs::remove_file(db_dir.join("segment_index").join("segment_1.idx")).ok();
+
+    let reopened = SpaceLoggerDb::open(
+        &db_dir,
+        DbOptions {
+            memtable_flush_rows: 4,
+            ..DbOptions::default()
+        },
+    )
+    .expect("reopen should succeed with legacy segment layout");
+
+    let success = reopened
+        .query(&query_by_subject("subject-8"), Some(1))
+        .expect("query should succeed");
+    assert_eq!(success.len(), 1, "success case should return one row");
+
+    let fail = reopened
+        .query(&no_match_query(), Some(1))
+        .expect("query should succeed");
+    assert_eq!(fail.len(), 0, "failure case should have no rows");
+
+    assert!(
+        db_dir.join("segment_meta").join("segment_1.meta").exists(),
+        "metadata sidecar should be rebuilt from legacy segment"
+    );
+    assert!(
+        db_dir.join("segment_index").join("segment_1.idx").exists(),
+        "index sidecar should be rebuilt from legacy segment"
+    );
+
+    std::fs::remove_dir_all(db_dir).ok();
+}
+
+#[test]
+fn auto_compaction_preserves_global_newest_order() {
+    let db_dir = fresh_db_dir("auto_compaction_preserves_global_newest_order");
+    let db = SpaceLoggerDb::open(
+        &db_dir,
+        DbOptions {
+            memtable_flush_rows: 1,
+            ..DbOptions::default()
+        },
+    )
+    .expect("open should succeed");
+
+    for seed in 0..90 {
+        let version = db.current_version();
+        db.insert_with_version(sample_row(seed), version)
+            .expect("insert should succeed");
+    }
+
+    let segment_entries = std::fs::read_dir(db_dir.join("segments"))
+        .expect("segment dir should be readable")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("segment entries should be readable")
+        .len();
+    assert!(
+        segment_entries < 90,
+        "auto compaction should reduce segment file fan-out"
+    );
+
+    let rows = db
+        .query(&Query::default(), Some(5))
+        .expect("query should succeed");
+    let subjects = rows.into_iter().map(|row| row.subject).collect::<Vec<_>>();
+    assert_eq!(
+        subjects,
+        vec![
+            "subject-89".to_string(),
+            "subject-88".to_string(),
+            "subject-87".to_string(),
+            "subject-86".to_string(),
+            "subject-85".to_string(),
+        ],
+        "newest ordering must remain stable after auto compaction"
+    );
+
+    let fail = db
+        .query(&no_match_query(), Some(5))
+        .expect("query should work");
+    assert_eq!(fail.len(), 0, "failure case should have no rows");
+
+    std::fs::remove_dir_all(db_dir).ok();
+}
+
+#[test]
+fn same_location_object_kill_limit_keeps_latest_kill_records() {
+    let db_dir = fresh_db_dir("same_location_object_kill_limit_keeps_latest_kill_records");
+    let db = SpaceLoggerDb::open(
+        &db_dir,
+        DbOptions {
+            memtable_flush_rows: 3,
+            same_location_kill_limit: 3,
+            ..DbOptions::default()
+        },
+    )
+    .expect("open should succeed");
+
+    for seed in 0..10 {
+        let version = db.current_version();
+        let mut row = sample_row(seed);
+        row.x = 123;
+        row.y = 456;
+        row.z = 789;
+        row.verb = "kill".to_string();
+        row.object = if seed % 2 == 0 {
+            "zombie".to_string()
+        } else {
+            "skeleton".to_string()
+        };
+        row.subject = format!("killer-{seed}");
+        db.insert_with_version(row, version)
+            .expect("insert should succeed");
+    }
+
+    db.flush().expect("flush should succeed");
+    db.compact().expect("compact should succeed");
+
+    let query = Query {
+        x: Some(IntPredicate {
+            eq: Some(123),
+            ..IntPredicate::default()
+        }),
+        y: Some(IntPredicate {
+            eq: Some(456),
+            ..IntPredicate::default()
+        }),
+        z: Some(IntPredicate {
+            eq: Some(789),
+            ..IntPredicate::default()
+        }),
+        verb: Some("kill".to_string()),
+        ..Query::default()
+    };
+    let rows = db.query(&query, None).expect("query should succeed");
+    assert_eq!(
+        rows.len(),
+        6,
+        "same-location kill cap should apply per object; two objects keep three each"
+    );
+
+    let zombie_query = Query {
+        object: Some("zombie".to_string()),
+        ..query.clone()
+    };
+    let zombie_rows = db.query(&zombie_query, None).expect("query should succeed");
+    assert_eq!(
+        zombie_rows.len(),
+        3,
+        "zombie kill rows should be capped to latest three at the same location"
+    );
+    let subjects = zombie_rows
+        .into_iter()
+        .map(|row| row.subject)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        subjects,
+        vec![
+            "killer-8".to_string(),
+            "killer-6".to_string(),
+            "killer-4".to_string(),
+        ],
+        "kill cap should keep newest rows for each (x,y,z,object) key"
+    );
+
+    let fail = db
+        .query(&no_match_query(), None)
+        .expect("query should work");
+    assert_eq!(fail.len(), 0, "failure case should have no rows");
+
+    std::fs::remove_dir_all(db_dir).ok();
+}
+
+#[test]
+fn disable_background_maintenance_keeps_segment_fanout() {
+    let db_dir = fresh_db_dir("disable_background_maintenance_keeps_segment_fanout");
+    let db = SpaceLoggerDb::open(
+        &db_dir,
+        DbOptions {
+            memtable_flush_rows: 1,
+            enable_background_maintenance: false,
+            ..DbOptions::default()
+        },
+    )
+    .expect("open should succeed");
+
+    for seed in 0..70 {
+        let version = db.current_version();
+        db.insert_with_version(sample_row(seed), version)
+            .expect("insert should succeed");
+    }
+
+    let segment_entries = std::fs::read_dir(db_dir.join("segments"))
+        .expect("segment dir should be readable")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("segment entries should be readable")
+        .len();
+    assert_eq!(
+        segment_entries, 70,
+        "when background maintenance is disabled, flushes should not auto-compact"
+    );
+
+    let success = db
+        .query(&query_by_subject("subject-69"), Some(1))
+        .expect("query should succeed");
+    assert_eq!(success.len(), 1, "success case should still be queryable");
+
+    let fail = db
+        .query(&no_match_query(), Some(1))
+        .expect("query should work");
+    assert_eq!(fail.len(), 0, "failure case should have no rows");
+
+    std::fs::remove_dir_all(db_dir).ok();
+}
+
+#[test]
+fn kill_limit_is_applied_during_compaction_when_background_disabled() {
+    let db_dir = fresh_db_dir("kill_limit_is_applied_during_compaction_when_background_disabled");
+    let db = SpaceLoggerDb::open(
+        &db_dir,
+        DbOptions {
+            memtable_flush_rows: 1,
+            same_location_kill_limit: 2,
+            enable_background_maintenance: false,
+            ..DbOptions::default()
+        },
+    )
+    .expect("open should succeed");
+
+    for seed in 0..5 {
+        let version = db.current_version();
+        let mut row = sample_row(seed);
+        row.x = 1;
+        row.y = 2;
+        row.z = 3;
+        row.verb = "kill".to_string();
+        row.object = "zombie".to_string();
+        db.insert_with_version(row, version)
+            .expect("insert should succeed");
+    }
+
+    let query = Query {
+        x: Some(IntPredicate {
+            eq: Some(1),
+            ..IntPredicate::default()
+        }),
+        y: Some(IntPredicate {
+            eq: Some(2),
+            ..IntPredicate::default()
+        }),
+        z: Some(IntPredicate {
+            eq: Some(3),
+            ..IntPredicate::default()
+        }),
+        object: Some("zombie".to_string()),
+        verb: Some("kill".to_string()),
+        ..Query::default()
+    };
+
+    let before_compact = db.query(&query, None).expect("query should succeed");
+    assert_eq!(
+        before_compact.len(),
+        5,
+        "without background maintenance, kill cap should not run immediately"
+    );
+
+    db.compact().expect("manual compact should succeed");
+
+    let after_compact = db.query(&query, None).expect("query should succeed");
+    assert_eq!(
+        after_compact.len(),
+        2,
+        "manual compaction should enforce kill cap policy"
+    );
+
+    let fail = db
+        .query(&no_match_query(), None)
+        .expect("query should work");
+    assert_eq!(fail.len(), 0, "failure case should have no rows");
 
     std::fs::remove_dir_all(db_dir).ok();
 }
