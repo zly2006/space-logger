@@ -13,7 +13,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 @Mixin(ServerExplosion.class)
 public abstract class ServerExplosionMixin implements OperationCarrierAccess {
     @Unique
-    private long sl$operationId;
+    private RecordMixinHelper.OperationContext sl$operationContext;
 
     @Inject(method = "<init>", at = @At("RETURN"))
     private void sl$captureOperationOnInit(CallbackInfo ci) {
@@ -22,7 +22,7 @@ public abstract class ServerExplosionMixin implements OperationCarrierAccess {
 
     @Inject(method = "explode", at = @At("HEAD"))
     private void sl$pushOperationBeforeExplode(CallbackInfoReturnable<Integer> cir) {
-        RecordMixinHelper.pushRecord(this.sl$operationId, "explosion");
+        RecordMixinHelper.pushFromCarrier(this, "explosion");
     }
 
     @Inject(method = "explode", at = @At("RETURN"))
@@ -31,12 +31,12 @@ public abstract class ServerExplosionMixin implements OperationCarrierAccess {
     }
 
     @Override
-    public long sl$getOperationId() {
-        return this.sl$operationId;
+    public RecordMixinHelper.OperationContext sl$getOperationContext() {
+        return this.sl$operationContext;
     }
 
     @Override
-    public void sl$setOperationId(long operationId) {
-        this.sl$operationId = operationId;
+    public void sl$setOperationContext(RecordMixinHelper.OperationContext operationContext) {
+        this.sl$operationContext = operationContext;
     }
 }

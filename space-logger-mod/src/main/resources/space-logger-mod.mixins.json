@@ -6,6 +6,7 @@
   "mixins": [
     "AbstractContainerMenuMixin",
     "BlockItemMixin",
+    "CommandsMixin",
     "LevelChunkMixin",
     "LivingEntityMixin",
     "PrimedTntMixin",

@@ -1,28 +1,15 @@
 package com.github.zly2006.sl.mixinhelper;
 
 import java.util.ArrayDeque;
-import java.util.Collections;
-import java.util.LinkedHashMap;
-import java.util.Map;
 
 import com.github.zly2006.sl.SpaceLogger;
+import com.github.zly2006.sl.access.OperationCarrierAccess;
 import com.github.zly2006.sl.jni.NativeSpaceLoggerBridge;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.block.state.BlockState;
 
 public final class RecordMixinHelper {
-    private static final int MAX_OPERATION_CONTEXTS = 8192;
-
-    private static long nextOperationId = 1L;
-    private static final Map<Long, OperationContext> OPERATION_CONTEXTS = Collections.synchronizedMap(
-        new LinkedHashMap<>(256, 0.75F, false) {
-            @Override
-            protected boolean removeEldestEntry(Map.Entry<Long, OperationContext> eldest) {
-                return size() > MAX_OPERATION_CONTEXTS;
-            }
-        }
-    );
     private static final ThreadLocal<ArrayDeque<OperationStackEntry>> OPERATION_STACK =
         ThreadLocal.withInitial(ArrayDeque::new);
 
@@ -33,15 +20,12 @@ public final class RecordMixinHelper {
         if (recording() != null) {
             return;
         }
-        long operationId = nextOperationId++;
         OperationContext context = new OperationContext(
-            operationId,
             NativeSpaceLoggerBridge.subject(player),
             NativeSpaceLoggerBridge.subjectExtra(player),
             cause
         );
-        OPERATION_CONTEXTS.put(operationId, context);
-        pushRecord(operationId, "player recording/" + player.getScoreboardName() + "/" + cause);
+        pushContext(context, "player recording/" + player.getScoreboardName() + "/" + cause);
     }
 
     public static void playerStopRecording(ServerPlayer player) {
@@ -51,18 +35,27 @@ public final class RecordMixinHelper {
         popRecord("player recording/" + player.getScoreboardName() + "/" + recording().cause());
     }
 
-    public static void pushRecord(long operationId, String reason) {
-        OPERATION_STACK.get().push(new OperationStackEntry(operationId, OPERATION_CONTEXTS.get(operationId), reason));
+    public static void pushFromCarrier(Object carrier, String reason) {
+        if (!(carrier instanceof OperationCarrierAccess access)) {
+            return;
+        }
+        OperationContext context = access.sl$getOperationContext();
+        if (context != null) {
+            pushContext(context, reason);
+        }
     }
 
     public static void popRecord(String reason) {
         ArrayDeque<OperationStackEntry> stack = OPERATION_STACK.get();
         if (stack.isEmpty()) {
-            throw new IllegalStateException("Cannot pop empty operation stack: " + reason);
+            // old logic throw new IllegalStateException("Cannot pop empty operation stack: " + reason);
+            return;
         }
         OperationStackEntry entry = stack.peek();
         if (!entry.reason().equals(reason)) {
-            throw new IllegalStateException("Cannot pop record with different reason: " + reason + " != " + entry.reason());
+            // old logic throw new IllegalStateException("Cannot pop record with different reason: " + reason + " != " + entry.reason());
+            stack.clear();
+            return;
         }
         stack.pop();
         if (stack.isEmpty()) {
@@ -76,12 +69,12 @@ public final class RecordMixinHelper {
     }
 
     public static void captureCurrentOperation(Object carrier) {
-        if (!(carrier instanceof com.github.zly2006.sl.access.OperationCarrierAccess access)) {
+        if (!(carrier instanceof OperationCarrierAccess access)) {
             return;
         }
         OperationContext context = recording();
         if (context != null) {
-            access.sl$setOperationId(context.id());
+            access.sl$setOperationContext(context);
         }
     }
 
@@ -108,14 +101,19 @@ public final class RecordMixinHelper {
 
     public enum OperationCause {
         BREAK_BLOCK,
+        COMMAND,
         USE_BLOCK,
         USE_ITEM,
         UNKNOWN
     }
 
-    public record OperationContext(long id, String subject, String subjectExtra, OperationCause cause) {
+    private static void pushContext(OperationContext context, String reason) {
+        OPERATION_STACK.get().push(new OperationStackEntry(context, reason));
     }
 
-    private record OperationStackEntry(long id, OperationContext context, String reason) {
+    public record OperationContext(String subject, String subjectExtra, OperationCause cause) {
+    }
+
+    private record OperationStackEntry(OperationContext context, String reason) {
     }
 }

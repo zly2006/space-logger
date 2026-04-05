@@ -1,7 +1,9 @@
 package com.github.zly2006.sl.access;
 
-public interface OperationCarrierAccess {
-    long sl$getOperationId();
+import com.github.zly2006.sl.mixinhelper.RecordMixinHelper;
 
-    void sl$setOperationId(long operationId);
+public interface OperationCarrierAccess {
+    RecordMixinHelper.OperationContext sl$getOperationContext();
+
+    void sl$setOperationContext(RecordMixinHelper.OperationContext operationContext);
 }

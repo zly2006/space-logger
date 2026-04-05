@@ -15,7 +15,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(PrimedTnt.class)
 public abstract class PrimedTntMixin extends Entity implements OperationCarrierAccess {
     @Unique
-    private long sl$operationId;
+    private RecordMixinHelper.OperationContext sl$operationContext;
 
     protected PrimedTntMixin(EntityType<?> entityType, Level level) {
         super(entityType, level);
@@ -30,7 +30,7 @@ public abstract class PrimedTntMixin extends Entity implements OperationCarrierA
 
     @Inject(method = "explode", at = @At("HEAD"))
     private void sl$pushOperationBeforeExplode(CallbackInfo ci) {
-        RecordMixinHelper.pushRecord(this.sl$operationId, "tnt explode/" + this.getId());
+        RecordMixinHelper.pushFromCarrier(this, "tnt explode/" + this.getId());
     }
 
     @Inject(method = "explode", at = @At("TAIL"))
@@ -39,12 +39,12 @@ public abstract class PrimedTntMixin extends Entity implements OperationCarrierA
     }
 
     @Override
-    public long sl$getOperationId() {
-        return this.sl$operationId;
+    public RecordMixinHelper.OperationContext sl$getOperationContext() {
+        return this.sl$operationContext;
     }
 
     @Override
-    public void sl$setOperationId(long operationId) {
-        this.sl$operationId = operationId;
+    public void sl$setOperationContext(RecordMixinHelper.OperationContext operationContext) {
+        this.sl$operationContext = operationContext;
     }
 }
