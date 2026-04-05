@@ -4,13 +4,20 @@ import com.github.zly2006.sl.SpaceLogger;
 import com.github.zly2006.sl.jni.NativeSpaceLoggerBridge;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
+import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.mojang.brigadier.exceptions.SimpleCommandExceptionType;
+import com.mojang.brigadier.suggestion.Suggestions;
+import com.mojang.brigadier.suggestion.SuggestionsBuilder;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.LinkedHashSet;
+import java.util.concurrent.CompletableFuture;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
@@ -28,9 +35,16 @@ import net.minecraft.server.level.ServerPlayer;
 
 public final class SpaceLoggerCommand {
     private static final int DEFAULT_LIMIT = 5;
+    private static final int DEFAULT_PAGE = 1;
     private static final int MAX_LIMIT = 200;
     private static final Pattern HUMAN_DURATION_PATTERN = Pattern.compile("(\\d+)(ms|s|m|h|d|w)", Pattern.CASE_INSENSITIVE);
     private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS z");
+    private static final List<String> FILTER_KEYS = List.of("subject", "object", "verb", "range", "limit", "page", "before", "after");
+    private static final List<String> VERB_SUGGESTIONS = List.of("hurt", "kill", "break", "place", "use", "add_item", "remove_item");
+    private static final List<String> RANGE_SUGGESTIONS = List.of("8", "16", "32", "64");
+    private static final List<String> LIMIT_SUGGESTIONS = List.of("5", "10", "25", "50", "100");
+    private static final List<String> PAGE_SUGGESTIONS = List.of("1", "2", "3", "4");
+    private static final List<String> TIME_SUGGESTIONS = List.of("30s", "5m", "30m", "1h", "1d");
 
     private static final SimpleCommandExceptionType PLAYER_ONLY = new SimpleCommandExceptionType(
         Component.literal("`/sl q` can only be executed by a player")
@@ -66,6 +80,7 @@ public final class SpaceLoggerCommand {
                             .executes(ctx -> executeQuery(ctx.getSource(), ""))
                             .then(
                                 Commands.argument("filters", StringArgumentType.greedyString())
+                                    .suggests(SpaceLoggerCommand::suggestQueryFilters)
                                     .executes(ctx -> executeQuery(ctx.getSource(), StringArgumentType.getString(ctx, "filters")))
                             )
                     )
@@ -90,6 +105,7 @@ public final class SpaceLoggerCommand {
         }
 
         ParsedFilters filters = parseFilters(filterText, player);
+        QueryPagination pagination = resolvePagination(filters.page, filters.limit);
         List<NativeSpaceLoggerBridge.QueryRow> rows = SpaceLogger.bridge().queryRows(
             filters.subject,
             filters.object,
@@ -102,22 +118,30 @@ public final class SpaceLoggerCommand {
             filters.maxZ,
             filters.afterTimeMs,
             filters.beforeTimeMs,
-            filters.limit
+            pagination.fetchLimit
         );
         long nowMs = System.currentTimeMillis();
 
-        if (rows.isEmpty()) {
-            source.sendSystemMessage(Component.literal("[space-logger] 找不到记录"));
+        if (rows.size() <= pagination.offset) {
+            source.sendSystemMessage(formatEmptyPageMessage(filters));
             return 1;
         }
 
-        int index = 1;
-        for (NativeSpaceLoggerBridge.QueryRow row : rows) {
+        boolean hasNextPage = rows.size() > pagination.offset + filters.limit;
+        int pageEndExclusive = Math.min(rows.size(), pagination.offset + filters.limit);
+        List<NativeSpaceLoggerBridge.QueryRow> pageRows = rows.subList(pagination.offset, pageEndExclusive);
+        source.sendSystemMessage(formatPageSummary(filters, pagination, pageRows.size(), hasNextPage));
+
+        int index = pagination.offset + 1;
+        for (NativeSpaceLoggerBridge.QueryRow row : pageRows) {
             source.sendSystemMessage(formatQueryRowLine(index, row, nowMs));
             index += 1;
         }
+        if (filters.page > DEFAULT_PAGE || hasNextPage) {
+            source.sendSystemMessage(formatPaginationControls(filters, hasNextPage));
+        }
 
-        return rows.size();
+        return pageRows.size();
     }
 
     private static MutableComponent formatQueryRowLine(int index, NativeSpaceLoggerBridge.QueryRow row, long nowMs) {
@@ -223,7 +247,7 @@ public final class SpaceLoggerCommand {
         return "now";
     }
 
-    private static ParsedFilters parseFilters(String rawFilterText, ServerPlayer player) throws CommandSyntaxException {
+    static ParsedFilters parseFilters(String rawFilterText, ServerPlayer player) throws CommandSyntaxException {
         String[] tokens = rawFilterText == null || rawFilterText.isBlank()
             ? new String[0]
             : rawFilterText.trim().split("\\s+");
@@ -233,9 +257,11 @@ public final class SpaceLoggerCommand {
         int verbMask = NativeSpaceLoggerBridge.VERB_MASK_ALL;
         Integer range = null;
         Integer limit = null;
+        Integer page = null;
         Long afterTimeMs = null;
         Long beforeTimeMs = null;
         long nowMs = System.currentTimeMillis();
+        List<String> pageBaseTokens = new ArrayList<>();
 
         for (String token : tokens) {
             String[] kv = token.split(":", 2);
@@ -264,6 +290,13 @@ public final class SpaceLoggerCommand {
                     }
                     limit = parsed;
                 }
+                case "page" -> {
+                    int parsed = parsePositiveInt(value, "page");
+                    if (parsed == 0) {
+                        throw syntax("page must be > 0");
+                    }
+                    page = parsed;
+                }
                 case "before" -> {
                     long durationMs = parseHumanDurationMillis(value);
                     beforeTimeMs = nowMs - durationMs;
@@ -273,6 +306,10 @@ public final class SpaceLoggerCommand {
                     afterTimeMs = nowMs - durationMs;
                 }
                 default -> throw syntax("unknown filter key: `" + key + "`");
+            }
+
+            if (!"page".equals(key)) {
+                pageBaseTokens.add(token);
             }
         }
 
@@ -289,6 +326,9 @@ public final class SpaceLoggerCommand {
         int minZ = Integer.MIN_VALUE;
         int maxZ = Integer.MAX_VALUE;
         if (range != null) {
+            if (player == null) {
+                throw syntax("range filter requires a player context");
+            }
             BlockPos center = player.blockPosition();
             minX = safeAdd(center.getX(), -range);
             maxX = safeAdd(center.getX(), range);
@@ -310,7 +350,156 @@ public final class SpaceLoggerCommand {
             maxZ,
             minTime,
             maxTime,
-            limit == null ? DEFAULT_LIMIT : limit
+            limit == null ? DEFAULT_LIMIT : limit,
+            page == null ? DEFAULT_PAGE : page,
+            pageBaseTokens
+        );
+    }
+
+    static QueryPagination resolvePagination(int page, int limit) throws CommandSyntaxException {
+        long offset = (long) (page - 1) * limit;
+        long fetchLimit = offset + limit + 1L;
+        if (offset > Integer.MAX_VALUE) {
+            throw syntax("page is too large");
+        }
+        if (fetchLimit > Integer.MAX_VALUE) {
+            throw syntax("page * limit is too large");
+        }
+        return new QueryPagination((int) offset, (int) fetchLimit);
+    }
+
+    static List<String> completeFilterToken(String rawFilters, String playerName) {
+        String filters = rawFilters == null ? "" : rawFilters;
+        boolean endsWithSpace = !filters.isEmpty() && Character.isWhitespace(filters.charAt(filters.length() - 1));
+        int tokenStart = endsWithSpace ? filters.length() : filters.lastIndexOf(' ') + 1;
+        String token = tokenStart >= filters.length() ? "" : filters.substring(tokenStart);
+        return suggestionsForToken(token, playerName);
+    }
+
+    private static CompletableFuture<Suggestions> suggestQueryFilters(CommandContext<CommandSourceStack> context, SuggestionsBuilder builder) {
+        String rawFilters = builder.getRemaining();
+        boolean endsWithSpace = !rawFilters.isEmpty() && Character.isWhitespace(rawFilters.charAt(rawFilters.length() - 1));
+        int tokenStart = endsWithSpace ? rawFilters.length() : rawFilters.lastIndexOf(' ') + 1;
+        String token = tokenStart >= rawFilters.length() ? "" : rawFilters.substring(tokenStart);
+        String playerName = null;
+        ServerPlayer player = context.getSource().getPlayer();
+        if (player != null) {
+            playerName = player.getScoreboardName();
+        }
+
+        SuggestionsBuilder tokenBuilder = builder.createOffset(builder.getStart() + tokenStart);
+        for (String suggestion : suggestionsForToken(token, playerName)) {
+            tokenBuilder.suggest(suggestion);
+        }
+        return tokenBuilder.buildFuture();
+    }
+
+    private static List<String> suggestionsForToken(String token, String playerName) {
+        if (token == null || token.isBlank()) {
+            return FILTER_KEYS.stream()
+                .map(key -> key + ":")
+                .toList();
+        }
+
+        int colonIndex = token.indexOf(':');
+        if (colonIndex < 0) {
+            return FILTER_KEYS.stream()
+                .filter(key -> key.startsWith(token.toLowerCase(Locale.ROOT)))
+                .map(key -> key + ":")
+                .toList();
+        }
+
+        String key = token.substring(0, colonIndex).toLowerCase(Locale.ROOT);
+        String value = token.substring(colonIndex + 1);
+        return switch (key) {
+            case "subject" -> suggestSingleValueToken(key, value, subjectSuggestions(playerName));
+            case "object" -> suggestSingleValueToken(key, value, List.of("minecraft:chest", "minecraft:stone", "minecraft:lever"));
+            case "verb" -> suggestVerbToken(value);
+            case "range" -> suggestSingleValueToken(key, value, RANGE_SUGGESTIONS);
+            case "limit" -> suggestSingleValueToken(key, value, LIMIT_SUGGESTIONS);
+            case "page" -> suggestSingleValueToken(key, value, PAGE_SUGGESTIONS);
+            case "before", "after" -> suggestSingleValueToken(key, value, TIME_SUGGESTIONS);
+            default -> List.of();
+        };
+    }
+
+    private static List<String> subjectSuggestions(String playerName) {
+        Set<String> suggestions = new LinkedHashSet<>();
+        if (playerName != null && !playerName.isBlank()) {
+            suggestions.add(playerName);
+        }
+        suggestions.add("player");
+        suggestions.add("minecraft:zombie");
+        return List.copyOf(suggestions);
+    }
+
+    private static List<String> suggestSingleValueToken(String key, String value, List<String> candidates) {
+        String normalizedValue = value == null ? "" : value;
+        return candidates.stream()
+            .filter(candidate -> candidate.startsWith(normalizedValue))
+            .map(candidate -> key + ":" + candidate)
+            .toList();
+    }
+
+    private static List<String> suggestVerbToken(String value) {
+        String normalizedValue = value == null ? "" : value;
+        int commaIndex = normalizedValue.lastIndexOf(',');
+        String prefix = commaIndex < 0 ? "" : normalizedValue.substring(0, commaIndex + 1);
+        String fragment = commaIndex < 0 ? normalizedValue : normalizedValue.substring(commaIndex + 1);
+        return VERB_SUGGESTIONS.stream()
+            .filter(candidate -> candidate.startsWith(fragment))
+            .map(candidate -> "verb:" + prefix + candidate)
+            .toList();
+    }
+
+    private static MutableComponent formatEmptyPageMessage(ParsedFilters filters) {
+        MutableComponent message = Component.literal("[space-logger] 第 " + filters.page + " 页没有记录")
+            .withStyle(ChatFormatting.RED);
+        if (filters.page > DEFAULT_PAGE) {
+            message.append(Component.literal(" "));
+            message.append(pageLink("上一页", filters.commandForPage(filters.page - 1), ChatFormatting.YELLOW));
+        }
+        return message;
+    }
+
+    private static MutableComponent formatPageSummary(
+        ParsedFilters filters,
+        QueryPagination pagination,
+        int pageSize,
+        boolean hasNextPage
+    ) {
+        int startIndex = pagination.offset + 1;
+        int endIndex = pagination.offset + pageSize;
+        MutableComponent message = Component.literal(
+            "[space-logger] 第 " + filters.page + " 页，显示第 " + startIndex + "-" + endIndex + " 条"
+        ).withStyle(ChatFormatting.GRAY);
+        if (hasNextPage) {
+            message.append(Component.literal(" (还有更多)").withStyle(ChatFormatting.DARK_GRAY));
+        }
+        return message;
+    }
+
+    private static MutableComponent formatPaginationControls(ParsedFilters filters, boolean hasNextPage) {
+        MutableComponent message = Component.literal("[space-logger] ").withStyle(ChatFormatting.GRAY);
+        if (filters.page > DEFAULT_PAGE) {
+            message.append(pageLink("上一页", filters.commandForPage(filters.page - 1), ChatFormatting.YELLOW));
+        } else {
+            message.append(Component.literal("上一页").withStyle(ChatFormatting.DARK_GRAY));
+        }
+        message.append(Component.literal(" | ").withStyle(ChatFormatting.DARK_GRAY));
+        if (hasNextPage) {
+            message.append(pageLink("下一页", filters.commandForPage(filters.page + 1), ChatFormatting.GREEN));
+        } else {
+            message.append(Component.literal("下一页").withStyle(ChatFormatting.DARK_GRAY));
+        }
+        return message;
+    }
+
+    private static MutableComponent pageLink(String label, String command, ChatFormatting color) {
+        return Component.literal(label).withStyle(style ->
+            style.withColor(color)
+                .withHoverEvent(new HoverEvent.ShowText(Component.literal(command)))
+                .withClickEvent(new ClickEvent.RunCommand(command))
         );
     }
 
@@ -416,19 +605,21 @@ public final class SpaceLoggerCommand {
         return new SimpleCommandExceptionType(Component.literal(message)).create();
     }
 
-    private static final class ParsedFilters {
-        private final String subject;
-        private final String object;
-        private final int verbMask;
-        private final int minX;
-        private final int maxX;
-        private final int minY;
-        private final int maxY;
-        private final int minZ;
-        private final int maxZ;
-        private final long afterTimeMs;
-        private final long beforeTimeMs;
-        private final int limit;
+    static final class ParsedFilters {
+        final String subject;
+        final String object;
+        final int verbMask;
+        final int minX;
+        final int maxX;
+        final int minY;
+        final int maxY;
+        final int minZ;
+        final int maxZ;
+        final long afterTimeMs;
+        final long beforeTimeMs;
+        final int limit;
+        final int page;
+        final List<String> pageBaseTokens;
 
         private ParsedFilters(
             String subject,
@@ -442,7 +633,9 @@ public final class SpaceLoggerCommand {
             int maxZ,
             long afterTimeMs,
             long beforeTimeMs,
-            int limit
+            int limit,
+            int page,
+            List<String> pageBaseTokens
         ) {
             this.subject = subject;
             this.object = object;
@@ -456,6 +649,29 @@ public final class SpaceLoggerCommand {
             this.afterTimeMs = afterTimeMs;
             this.beforeTimeMs = beforeTimeMs;
             this.limit = limit;
+            this.page = page;
+            this.pageBaseTokens = List.copyOf(pageBaseTokens);
+        }
+
+        String commandForPage(int targetPage) {
+            List<String> tokens = new ArrayList<>(this.pageBaseTokens);
+            if (targetPage > DEFAULT_PAGE) {
+                tokens.add("page:" + targetPage);
+            }
+            if (tokens.isEmpty()) {
+                return "/sl q";
+            }
+            return "/sl q " + String.join(" ", tokens);
+        }
+    }
+
+    static final class QueryPagination {
+        final int offset;
+        final int fetchLimit;
+
+        private QueryPagination(int offset, int fetchLimit) {
+            this.offset = offset;
+            this.fetchLimit = fetchLimit;
         }
     }
 }
