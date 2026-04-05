@@ -3,10 +3,12 @@ package com.github.zly2006.sl.gametest;
 import com.github.zly2006.sl.SpaceLogger;
 import com.github.zly2006.sl.jni.NativeSpaceLoggerBridge;
 import net.fabricmc.fabric.api.gametest.v1.GameTest;
+import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.permissions.PermissionSet;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.inventory.AbstractContainerMenu;
@@ -405,7 +407,7 @@ public class SpaceLoggerGameTests {
             );
         });
 
-        helper.runAfterDelay(125, () -> {
+        helper.succeedWhen(() -> {
             helper.assertTrue(
                 helper.getLevel().getBlockState(absTargetStonePos).isAir(),
                 "expected TNT2 explosion to destroy the target stone"
@@ -421,6 +423,59 @@ public class SpaceLoggerGameTests {
                 finalBreakCount == 1,
                 "expected exactly one target stone break row for igniting player, actual=" + finalBreakCount
             );
+        });
+    }
+
+    @GameTest
+    public void recordsFillCommandBreaksBlocksForPlayer(GameTestHelper helper) {
+        long startTimeMs = System.currentTimeMillis();
+        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        player.setGameMode(GameType.SURVIVAL);
+
+        BlockPos firstPos = new BlockPos(1, 1, 1);
+        BlockPos secondPos = new BlockPos(2, 1, 1);
+        BlockPos absFirstPos = helper.absolutePos(firstPos);
+        BlockPos absSecondPos = helper.absolutePos(secondPos);
+        String subject = NativeSpaceLoggerBridge.subject(player);
+        String stoneObject = NativeSpaceLoggerBridge.blockId(Blocks.STONE.defaultBlockState());
+
+        helper.setBlock(firstPos, Blocks.STONE);
+        helper.setBlock(secondPos, Blocks.STONE);
+
+        CommandSourceStack commandSource = player.createCommandSourceStack()
+            .withPermission(PermissionSet.ALL_PERMISSIONS);
+        String command = String.format(
+            "/fill %d %d %d %d %d %d air destroy",
+            absFirstPos.getX(),
+            absFirstPos.getY(),
+            absFirstPos.getZ(),
+            absSecondPos.getX(),
+            absSecondPos.getY(),
+            absSecondPos.getZ()
+        );
+        helper.getLevel().getServer().getCommands().performPrefixedCommand(commandSource, command);
+
+        helper.runAfterDelay(2, () -> {
+            helper.assertTrue(helper.getLevel().getBlockState(absFirstPos).isAir(), "expected first fill target to be removed");
+            helper.assertTrue(helper.getLevel().getBlockState(absSecondPos).isAir(), "expected second fill target to be removed");
+
+            int firstBreakCount = countRowsAt(
+                subject,
+                stoneObject,
+                NativeSpaceLoggerBridge.VERB_BREAK,
+                absFirstPos,
+                startTimeMs
+            );
+            int secondBreakCount = countRowsAt(
+                subject,
+                stoneObject,
+                NativeSpaceLoggerBridge.VERB_BREAK,
+                absSecondPos,
+                startTimeMs
+            );
+
+            helper.assertTrue(firstBreakCount == 1, "expected exactly one break row at first fill target, actual=" + firstBreakCount);
+            helper.assertTrue(secondBreakCount == 1, "expected exactly one break row at second fill target, actual=" + secondBreakCount);
             helper.succeed();
         });
     }
