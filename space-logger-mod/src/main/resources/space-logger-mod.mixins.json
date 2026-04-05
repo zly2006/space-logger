@@ -6,7 +6,10 @@
   "mixins": [
     "AbstractContainerMenuMixin",
     "BlockItemMixin",
+    "LevelChunkMixin",
     "LivingEntityMixin",
+    "PrimedTntMixin",
+    "ServerExplosionMixin",
     "ServerPlayerGameModeMixin"
   ],
   "injectors": {

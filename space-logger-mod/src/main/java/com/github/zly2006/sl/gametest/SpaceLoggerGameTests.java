@@ -53,8 +53,6 @@ public class SpaceLoggerGameTests {
 
     @GameTest
     public void recordsBreakPlaceUse(GameTestHelper helper) {
-        int placeBefore = SpaceLogger.bridge().countByVerb(NativeSpaceLoggerBridge.VERB_PLACE);
-        int breakBefore = SpaceLogger.bridge().countByVerb(NativeSpaceLoggerBridge.VERB_BREAK);
         int noMatchBefore = SpaceLogger.bridge().countByVerb(-1);
         long startTimeMs = System.currentTimeMillis();
 
@@ -64,10 +62,13 @@ public class SpaceLoggerGameTests {
         BlockPos placePos = new BlockPos(1, 1, 1);
         BlockPos breakPos = new BlockPos(2, 1, 1);
         BlockPos usePos = new BlockPos(3, 1, 1);
+        String subject = NativeSpaceLoggerBridge.subject(player);
+        String stoneObject = NativeSpaceLoggerBridge.blockId(Blocks.STONE.defaultBlockState());
 
         helper.setBlock(placePos, Blocks.STONE);
         player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.STONE));
         BlockPos absPlacePos = helper.absolutePos(placePos);
+        BlockPos absPlacedBlockPos = absPlacePos.above();
         BlockHitResult placeHit = new BlockHitResult(
             Vec3.atCenterOf(absPlacePos),
             Direction.UP,
@@ -108,8 +109,20 @@ public class SpaceLoggerGameTests {
         helper.assertTrue(useResult.consumesAction(), "expected useItemOn to consume action");
 
         helper.runAfterDelay(2, () -> {
-            int placeCount = SpaceLogger.bridge().countByVerb(NativeSpaceLoggerBridge.VERB_PLACE);
-            int breakCount = SpaceLogger.bridge().countByVerb(NativeSpaceLoggerBridge.VERB_BREAK);
+            int placeCount = countRowsAt(
+                subject,
+                stoneObject,
+                NativeSpaceLoggerBridge.VERB_PLACE,
+                absPlacedBlockPos,
+                startTimeMs
+            );
+            int breakCount = countRowsAt(
+                subject,
+                stoneObject,
+                NativeSpaceLoggerBridge.VERB_BREAK,
+                absBreakPos,
+                startTimeMs
+            );
             int noMatchCount = SpaceLogger.bridge().countByVerb(-1);
             int useAtPlacePos = SpaceLogger.bridge().queryRows(
                 "",
@@ -141,12 +154,12 @@ public class SpaceLoggerGameTests {
             ).size();
 
             helper.assertTrue(
-                placeCount == placeBefore + 1,
-                "expected place count to increase by exactly 1, before=" + placeBefore + ", after=" + placeCount
+                placeCount == 1,
+                "expected exactly one place row at placed block position, actual=" + placeCount
             );
             helper.assertTrue(
-                breakCount == breakBefore + 1,
-                "expected break count to increase by exactly 1, before=" + breakBefore + ", after=" + breakCount
+                breakCount == 1,
+                "expected exactly one break row at broken block position, actual=" + breakCount
             );
             helper.assertTrue(useAtPlacePos == 0, "expected place action to not log use");
             helper.assertTrue(useAtUsePos == 1, "expected exactly one use row on lever position");
@@ -272,6 +285,142 @@ public class SpaceLoggerGameTests {
             helper.assertTrue(addRow.nbtPayloadLen() > 0, "expected add_item nbt payload len > 0");
             helper.assertTrue(removeRow.nbtPayloadLen() > 0, "expected remove_item nbt payload len > 0");
             helper.assertTrue(noMatchCount == noMatchBefore, "expected unknown verb count unchanged");
+            helper.succeed();
+        });
+    }
+
+    @GameTest
+    public void recordsAttachedTorchWhenSupportingBlockBroken(GameTestHelper helper) {
+        long startTimeMs = System.currentTimeMillis();
+        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        player.setGameMode(GameType.SURVIVAL);
+
+        BlockPos supportPos = new BlockPos(1, 1, 1);
+        BlockPos torchPos = supportPos.above();
+        BlockPos absSupportPos = helper.absolutePos(supportPos);
+        BlockPos absTorchPos = helper.absolutePos(torchPos);
+        String subject = NativeSpaceLoggerBridge.subject(player);
+        String supportObject = NativeSpaceLoggerBridge.blockId(Blocks.STONE.defaultBlockState());
+        String torchObject = NativeSpaceLoggerBridge.blockId(Blocks.TORCH.defaultBlockState());
+
+        helper.setBlock(supportPos, Blocks.STONE);
+        helper.setBlock(torchPos, Blocks.TORCH);
+
+        player.setPos(absSupportPos.getX() + 0.5D, absSupportPos.getY() + 1.0D, absSupportPos.getZ() + 0.5D);
+        boolean destroyed = player.gameMode.destroyBlock(absSupportPos);
+        helper.assertTrue(destroyed, "expected supporting block destroy to succeed");
+
+        helper.runAfterDelay(2, () -> {
+            helper.assertTrue(
+                helper.getLevel().getBlockState(absSupportPos).isAir(),
+                "expected supporting block to be removed"
+            );
+            helper.assertTrue(
+                helper.getLevel().getBlockState(absTorchPos).isAir(),
+                "expected attached torch to be removed after support break"
+            );
+
+            int supportBreakCount = countRowsAt(
+                subject,
+                supportObject,
+                NativeSpaceLoggerBridge.VERB_BREAK,
+                absSupportPos,
+                startTimeMs
+            );
+            int torchBreakCount = countRowsAt(
+                subject,
+                torchObject,
+                NativeSpaceLoggerBridge.VERB_BREAK,
+                absTorchPos,
+                startTimeMs
+            );
+
+            helper.assertTrue(
+                supportBreakCount == 1,
+                "expected exactly one supporting block break row, actual=" + supportBreakCount
+            );
+            helper.assertTrue(
+                torchBreakCount == 1,
+                "expected exactly one attached torch break row, actual=" + torchBreakCount
+            );
+            helper.succeed();
+        });
+    }
+
+    @GameTest(maxTicks = 160)
+    public void recordsChainTntBreakForIgnitingPlayer(GameTestHelper helper) {
+        long startTimeMs = System.currentTimeMillis();
+        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        player.setGameMode(GameType.SURVIVAL);
+
+        BlockPos tnt1Pos = new BlockPos(1, 2, 1);
+        BlockPos tnt2Pos = new BlockPos(4, 2, 1);
+        BlockPos targetStonePos = new BlockPos(7, 2, 1);
+        BlockPos absTnt1Pos = helper.absolutePos(tnt1Pos);
+        BlockPos absTargetStonePos = helper.absolutePos(targetStonePos);
+        String subject = NativeSpaceLoggerBridge.subject(player);
+        String stoneObject = NativeSpaceLoggerBridge.blockId(Blocks.STONE.defaultBlockState());
+
+        for (int x = 1; x <= 7; x++) {
+            helper.setBlock(new BlockPos(x, 1, 1), Blocks.OBSIDIAN);
+        }
+        helper.setBlock(tnt1Pos, Blocks.TNT);
+        helper.setBlock(tnt2Pos, Blocks.TNT);
+        helper.setBlock(targetStonePos, Blocks.STONE);
+
+        player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.FLINT_AND_STEEL));
+        player.setPos(absTnt1Pos.getX() + 0.5D, absTnt1Pos.getY() + 1.0D, absTnt1Pos.getZ() + 0.5D);
+        BlockHitResult igniteHit = new BlockHitResult(
+            Vec3.atCenterOf(absTnt1Pos),
+            Direction.UP,
+            absTnt1Pos,
+            false
+        );
+        InteractionResult igniteResult = player.gameMode.useItemOn(
+            player,
+            helper.getLevel(),
+            player.getItemInHand(InteractionHand.MAIN_HAND),
+            InteractionHand.MAIN_HAND,
+            igniteHit
+        );
+        helper.assertTrue(igniteResult.consumesAction(), "expected TNT ignition to consume action");
+
+        player.setPos(absTargetStonePos.getX() + 8.0D, absTargetStonePos.getY() + 2.0D, absTargetStonePos.getZ() + 8.0D);
+
+        helper.runAfterDelay(85, () -> {
+            helper.assertTrue(
+                helper.getLevel().getBlockState(absTargetStonePos).is(Blocks.STONE),
+                "expected target stone to survive TNT1 explosion before TNT2 explodes"
+            );
+            int earlyBreakCount = countRowsAt(
+                subject,
+                stoneObject,
+                NativeSpaceLoggerBridge.VERB_BREAK,
+                absTargetStonePos,
+                startTimeMs
+            );
+            helper.assertTrue(
+                earlyBreakCount == 0,
+                "expected no stone break row before TNT2 explosion, actual=" + earlyBreakCount
+            );
+        });
+
+        helper.runAfterDelay(125, () -> {
+            helper.assertTrue(
+                helper.getLevel().getBlockState(absTargetStonePos).isAir(),
+                "expected TNT2 explosion to destroy the target stone"
+            );
+            int finalBreakCount = countRowsAt(
+                subject,
+                stoneObject,
+                NativeSpaceLoggerBridge.VERB_BREAK,
+                absTargetStonePos,
+                startTimeMs
+            );
+            helper.assertTrue(
+                finalBreakCount == 1,
+                "expected exactly one target stone break row for igniting player, actual=" + finalBreakCount
+            );
             helper.succeed();
         });
     }
@@ -438,5 +587,22 @@ public class SpaceLoggerGameTests {
             }
         }
         return -1;
+    }
+
+    private static int countRowsAt(String subject, String object, int verbId, BlockPos pos, long startTimeMs) {
+        return SpaceLogger.bridge().queryRows(
+            subject,
+            object,
+            mask(verbId),
+            pos.getX(),
+            pos.getX(),
+            pos.getY(),
+            pos.getY(),
+            pos.getZ(),
+            pos.getZ(),
+            startTimeMs,
+            Long.MAX_VALUE,
+            32
+        ).size();
     }
 }
