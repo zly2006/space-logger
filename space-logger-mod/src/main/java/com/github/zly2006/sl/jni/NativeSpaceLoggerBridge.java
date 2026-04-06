@@ -2,10 +2,13 @@ package com.github.zly2006.sl.jni;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -374,41 +377,57 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
     }
 
     private static void loadNativeLibrary(Path gameDir) {
-        String explicit = System.getProperty("space_logger_native_lib");
-        if (explicit != null && !explicit.isBlank()) {
-            Path explicitPath = Path.of(explicit).toAbsolutePath();
-            System.load(explicitPath.toString());
-            LOGGER.info("Loaded native space logger from explicit path: {}", explicitPath);
-            return;
-        }
+        BundledNative bundledNative = bundledNativeForCurrentPlatform();
+        String resourcePath = "natives/" + bundledNative.resourceDirectory() + "/" + bundledNative.libraryFileName();
+        Path nativeCacheDir = gameDir.toAbsolutePath().resolve(".space-logger").resolve("natives");
 
-        String libName = System.mapLibraryName("space_logger_native");
-        List<Path> candidates = new ArrayList<>();
-        Path workingDir = Path.of("").toAbsolutePath();
-        Path gameParent = gameDir.getParent();
+        try {
+            Files.createDirectories(nativeCacheDir);
+            Path extractedLib = Files.createTempFile(
+                nativeCacheDir,
+                "space-logger-native-",
+                "-" + bundledNative.libraryFileName()
+            );
+            extractedLib.toFile().deleteOnExit();
 
-        candidates.add(workingDir.resolve("native-logger/target/release/" + libName));
-        candidates.add(workingDir.resolve("native-logger/target/debug/" + libName));
-        if (gameParent != null) {
-            candidates.add(gameParent.resolve("native-logger/target/release/" + libName));
-            candidates.add(gameParent.resolve("native-logger/target/debug/" + libName));
-        }
-
-        for (Path candidate : candidates) {
-            if (candidate != null && Files.exists(candidate)) {
-                System.load(candidate.toAbsolutePath().toString());
-                LOGGER.info("Loaded native space logger from {}", candidate);
-                return;
+            try (InputStream resource = NativeSpaceLoggerBridge.class.getClassLoader().getResourceAsStream(resourcePath)) {
+                if (resource == null) {
+                    throw new IllegalStateException("Bundled native resource not found: " + resourcePath);
+                }
+                Files.copy(resource, extractedLib, StandardCopyOption.REPLACE_EXISTING);
             }
+
+            System.load(extractedLib.toAbsolutePath().toString());
+            LOGGER.info("Loaded bundled native space logger from {}", extractedLib);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to extract bundled native space logger: " + resourcePath, e);
+        }
+    }
+
+    private static BundledNative bundledNativeForCurrentPlatform() {
+        String osName = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        String arch = normalizeArch(System.getProperty("os.arch", ""));
+
+        if (osName.contains("linux") && arch.equals("x86_64")) {
+            return new BundledNative("linux-x86_64", "libspace_logger_native.so");
+        }
+        if ((osName.contains("mac") || osName.contains("darwin")) && arch.equals("aarch64")) {
+            return new BundledNative("macos-aarch64", "libspace_logger_native.dylib");
         }
 
-        StringBuilder msg = new StringBuilder("Cannot find native space logger library. Tried:\n");
-        for (Path candidate : candidates) {
-            msg.append(" - ").append(candidate).append('\n');
-        }
-        msg.append("You can set -Dspace_logger_native_lib=/absolute/path/to/").append(libName);
-        throw new IllegalStateException(msg.toString());
+        throw new IllegalStateException("Unsupported platform for bundled space logger native: os=" + osName + ", arch=" + arch);
     }
+
+    private static String normalizeArch(String arch) {
+        String normalized = arch.toLowerCase(Locale.ROOT);
+        return switch (normalized) {
+            case "amd64", "x86_64" -> "x86_64";
+            case "arm64", "aarch64" -> "aarch64";
+            default -> normalized;
+        };
+    }
+
+    private record BundledNative(String resourceDirectory, String libraryFileName) {}
 
     private static String safe(String value) {
         return value == null ? "" : value;

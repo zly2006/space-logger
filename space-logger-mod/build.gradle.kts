@@ -1,6 +1,7 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 import org.gradle.api.GradleException
+import org.gradle.api.tasks.Sync
 
 plugins {
     kotlin("jvm") version "2.3.10"
@@ -58,6 +59,14 @@ dependencies {
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
+data class BundledNativeTarget(
+    val taskName: String,
+    val resourceDirectory: String,
+    val cargoTarget: String,
+    val libraryFileName: String,
+    val needsLinuxCrossLinker: Boolean = false,
+)
+
 val nativeProfile = providers.gradleProperty("spaceLoggerNativeProfile")
     .map { profile -> if (profile.equals("release", ignoreCase = true)) "release" else "debug" }
     .orElse("debug")
@@ -72,16 +81,66 @@ val cargoExecutable = run {
         if (cargoFromHome != null && cargoFromHome.exists()) cargoFromHome.absolutePath else "cargo"
     }
 }
-val nativeLibName = System.mapLibraryName("space_logger_native")
-val nativeLibPath = nativeProfile.map { profile ->
-    file("native-logger/target/$profile/$nativeLibName")
+val zigExecutable = System.getenv("SPACE_LOGGER_ZIG_BIN")?.takeIf { it.isNotBlank() }
+    ?: System.getenv("ZIG")?.takeIf { it.isNotBlank() }
+    ?: "zig"
+val bundledNativeTargets = listOf(
+    BundledNativeTarget(
+        taskName = "cargoBuildLinuxX64Native",
+        resourceDirectory = "linux-x86_64",
+        cargoTarget = "x86_64-unknown-linux-gnu",
+        libraryFileName = "libspace_logger_native.so",
+        needsLinuxCrossLinker = true,
+    ),
+    BundledNativeTarget(
+        taskName = "cargoBuildMacOsArm64Native",
+        resourceDirectory = "macos-aarch64",
+        cargoTarget = "aarch64-apple-darwin",
+        libraryFileName = "libspace_logger_native.dylib",
+    ),
+)
+val bundledNativeResourcesDir = layout.buildDirectory.dir("generated/native-resources/main")
+
+fun bundledNativeOutput(target: BundledNativeTarget) = nativeProfile.map { profile ->
+    file("native-logger/target/${target.cargoTarget}/$profile/${target.libraryFileName}")
 }
-val cargoBuildNative by tasks.registering(Exec::class) {
+val linuxCrossLinkerScript = layout.buildDirectory.file("native-tooling/zig-x86_64-unknown-linux-gnu-linker.sh")
+val prepareLinuxCrossLinker by tasks.registering {
+    outputs.file(linuxCrossLinkerScript)
+    doLast {
+        val scriptFile = linuxCrossLinkerScript.get().asFile
+        scriptFile.parentFile.mkdirs()
+        scriptFile.writeText(
+            """
+            |#!/bin/sh
+            |exec "$zigExecutable" cc -target x86_64-linux-gnu "$@"
+            """.trimMargin()
+        )
+        scriptFile.setExecutable(true)
+    }
+}
+
+fun registerCargoBuildTask(target: BundledNativeTarget) = tasks.register(target.taskName, Exec::class) {
     group = "build"
-    description = "Build Rust JNI library for space-logger-mod."
-    workingDir = file("native-logger")
+    description = "Build Rust JNI library for ${target.resourceDirectory}."
+    if (target.needsLinuxCrossLinker) {
+        dependsOn(prepareLinuxCrossLinker)
+    }
     val profile = nativeProfile.get()
-    val args = mutableListOf("build")
+    val nativeOutput = bundledNativeOutput(target)
+    inputs.property("profile", nativeProfile)
+    inputs.property("cargoTarget", target.cargoTarget)
+    inputs.files(
+        file("native-logger/Cargo.toml"),
+        file("native-logger/Cargo.lock"),
+        file("../Cargo.toml"),
+        file("../Cargo.lock"),
+    )
+    inputs.dir(file("native-logger/src"))
+    inputs.dir(file("../src"))
+    outputs.file(nativeOutput)
+    workingDir = file("native-logger")
+    val args = mutableListOf("build", "--target", target.cargoTarget)
     if (profile == "release") {
         args.add("--release")
     }
@@ -91,20 +150,39 @@ val cargoBuildNative by tasks.registering(Exec::class) {
         val currentPath = System.getenv("PATH") ?: ""
         environment("PATH", "$home/.cargo/bin:$currentPath")
     }
+    if (target.needsLinuxCrossLinker) {
+        environment(
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER",
+            linuxCrossLinkerScript.get().asFile.absolutePath
+        )
+    }
+    doLast {
+        val nativeLib = nativeOutput.get()
+        if (!nativeLib.exists()) {
+            throw GradleException("Native library not found after cargo build: ${nativeLib.absolutePath}")
+        }
+    }
+}
+val cargoBuildBundledNatives = bundledNativeTargets.map(::registerCargoBuildTask)
+val bundleBundledNativeLibs by tasks.registering(Sync::class) {
+    group = "build"
+    description = "Copy bundled native libraries into generated resources."
+    dependsOn(cargoBuildBundledNatives)
+    into(bundledNativeResourcesDir)
 
-    inputs.files(
-        file("native-logger/Cargo.toml"),
-        file("native-logger/Cargo.lock"),
-        file("../Cargo.toml"),
-        file("../Cargo.lock"),
-    )
-    inputs.dir(file("native-logger/src"))
-    inputs.dir(file("../src"))
-    outputs.upToDateWhen { false }
+    bundledNativeTargets.forEach { target ->
+        from(bundledNativeOutput(target)) {
+            into("natives/${target.resourceDirectory}")
+        }
+    }
+}
+
+sourceSets.named("main") {
+    resources.srcDir(bundledNativeResourcesDir)
 }
 
 tasks.processResources {
-    dependsOn(cargoBuildNative)
+    dependsOn(bundleBundledNativeLibs)
     inputs.property("version", project.version)
     inputs.property("minecraft_version", project.property("minecraft_version"))
     inputs.property("loader_version", project.property("loader_version"))
@@ -118,7 +196,6 @@ tasks.processResources {
 }
 
 tasks.withType<JavaCompile>().configureEach {
-    dependsOn(cargoBuildNative)
     // ensure that the encoding is set to UTF-8, no matter what the system default is
     // this fixes some edge cases with special characters not displaying correctly
     // see http://yodaconditions.net/blog/fix-for-java-file-encoding-problems-with-gradle.html
@@ -128,21 +205,11 @@ tasks.withType<JavaCompile>().configureEach {
 }
 
 tasks.withType<KotlinCompile>().configureEach {
-    dependsOn(cargoBuildNative)
     compilerOptions.jvmTarget.set(JvmTarget.fromTarget(targetJavaVersion.toString()))
 }
 
 tasks.withType<JavaExec>().configureEach {
-    dependsOn(cargoBuildNative)
-    doFirst {
-        val nativeLib = nativeLibPath.get().absoluteFile
-        if (!nativeLib.exists()) {
-            throw GradleException(
-                "Native library not found after cargo build: ${nativeLib.absolutePath}"
-            )
-        }
-        systemProperty("space_logger_native_lib", nativeLib.absolutePath)
-    }
+    dependsOn(bundleBundledNativeLibs)
 }
 
 tasks.test {
