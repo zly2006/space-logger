@@ -27,7 +27,8 @@ public abstract class CommandsMixin {
         if (parseResults.getContext().getSource().getEntity() instanceof ServerPlayer player) {
             CommandSourceStack source = parseResults.getContext().getSource();
             String normalizedCommand = NativeSpaceLoggerBridge.normalizeCommand(command);
-            if (!normalizedCommand.isBlank()) {
+            // 过滤掉空命令和本模组查询日志的命令，避免死循环
+            if (!normalizedCommand.isBlank() && !normalizedCommand.startsWith("sl q ")) {
                 BlockPos pos = BlockPos.containing(source.getPosition());
                 SpaceLogger.bridge().appendNow(
                     pos.getX(),

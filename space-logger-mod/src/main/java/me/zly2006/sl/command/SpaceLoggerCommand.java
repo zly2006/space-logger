@@ -174,7 +174,10 @@ public final class SpaceLoggerCommand {
         if (row.dataLen() > 0) {
             if (row.verb() == NativeSpaceLoggerBridge.VERB_COMMAND) {
                 line.append(Component.literal(" "));
-                line.append(Component.literal(new String(row.dataHead())).withStyle(ChatFormatting.DARK_PURPLE));
+                line.append(Component.literal("(cmd)").withStyle(style ->
+                        style.withColor(ChatFormatting.DARK_GRAY)
+                                .withHoverEvent(new HoverEvent.ShowText(Component.literal(new String(row.dataHead()))))
+                ));
             } else {
                 line.append(Component.literal(" "));
                 line.append(Component.literal("(+" + row.dataLen() + ")").withStyle(style ->
