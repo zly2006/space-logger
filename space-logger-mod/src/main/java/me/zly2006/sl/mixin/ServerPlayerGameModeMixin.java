@@ -89,7 +89,7 @@ public abstract class ServerPlayerGameModeMixin {
         }
 
         var placedEntities = RecordMixinHelper.consumePendingEntityPlacements();
-        if (!placedEntities.isEmpty() && stack.getCount() < this.sl$mainHandCountBeforeUse) {
+        if (!placedEntities.isEmpty() && result instanceof InteractionResult.Success) {
             for (var placement : placedEntities) {
                 BlockPos pos = placement.pos();
                 SpaceLogger.bridge().appendNow(
