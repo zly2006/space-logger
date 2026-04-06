@@ -22,6 +22,7 @@ pub const VERB_PLACE: u32 = 3;
 pub const VERB_USE: u32 = 4;
 pub const VERB_ADD_ITEM: u32 = 5;
 pub const VERB_REMOVE_ITEM: u32 = 6;
+pub const VERB_COMMAND: u32 = 7;
 pub const VERB_MASK_ALL: u32 = u32::MAX;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -167,6 +168,7 @@ pub fn verb_name(verb: u32) -> &'static str {
         VERB_USE => "use",
         VERB_ADD_ITEM => "add_item",
         VERB_REMOVE_ITEM => "remove_item",
+        VERB_COMMAND => "command",
         _ => "unknown",
     }
 }
@@ -180,6 +182,7 @@ pub fn verb_id_from_name(name: &str) -> Option<u32> {
         "use" => Some(VERB_USE),
         "add_item" => Some(VERB_ADD_ITEM),
         "remove_item" => Some(VERB_REMOVE_ITEM),
+        "command" => Some(VERB_COMMAND),
         _ => None,
     }
 }

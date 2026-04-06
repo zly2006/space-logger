@@ -33,6 +33,7 @@ import net.minecraft.world.entity.monster.zombie.Zombie;
 
 import java.util.Objects;
 import java.util.UUID;
+import java.nio.charset.StandardCharsets;
 
 public class SpaceLoggerGameTests {
     private static int mask(int verbId) {
@@ -41,24 +42,35 @@ public class SpaceLoggerGameTests {
 
     @GameTest
     public void recordsHurtAndKill(GameTestHelper helper) {
-        int hurtBefore = SpaceLogger.bridge().countByVerb(NativeSpaceLoggerBridge.VERB_HURT);
-        int killBefore = SpaceLogger.bridge().countByVerb(NativeSpaceLoggerBridge.VERB_KILL);
-        int noMatchBefore = SpaceLogger.bridge().countByVerb(-1);
+        long startTimeMs = System.currentTimeMillis();
 
         ServerPlayer player = makeMockServerPlayerInLevel(helper);
         player.setGameMode(GameType.SURVIVAL);
 
         net.minecraft.world.entity.monster.zombie.Zombie zombie = helper.spawn(EntityType.ZOMBIE, new BlockPos(1, 1, 1));
+        BlockPos absZombiePos = zombie.blockPosition();
+        String subject = NativeSpaceLoggerBridge.subject(player);
+        String zombieObject = NativeSpaceLoggerBridge.entityId(zombie);
         helper.hurt(zombie, player.damageSources().playerAttack(player), 100.0F);
 
         helper.runAfterDelay(2, () -> {
-            int hurtCount = SpaceLogger.bridge().countByVerb(NativeSpaceLoggerBridge.VERB_HURT);
-            int killCount = SpaceLogger.bridge().countByVerb(NativeSpaceLoggerBridge.VERB_KILL);
-            int noMatchCount = SpaceLogger.bridge().countByVerb(-1);
+            int hurtCount = countRowsAt(
+                subject,
+                zombieObject,
+                NativeSpaceLoggerBridge.VERB_HURT,
+                absZombiePos,
+                startTimeMs
+            );
+            int killCount = countRowsAt(
+                subject,
+                zombieObject,
+                NativeSpaceLoggerBridge.VERB_KILL,
+                absZombiePos,
+                startTimeMs
+            );
 
-            helper.assertTrue(hurtCount == hurtBefore + 1, "expected hurt count to increase by exactly 1");
-            helper.assertTrue(killCount == killBefore + 1, "expected kill count to increase by exactly 1");
-            helper.assertTrue(noMatchCount == noMatchBefore, "expected unknown verb count unchanged");
+            helper.assertTrue(hurtCount == 1, "expected exactly one hurt row for zombie target, actual=" + hurtCount);
+            helper.assertTrue(killCount == 1, "expected exactly one kill row for zombie target, actual=" + killCount);
             helper.succeed();
         });
     }
@@ -621,6 +633,48 @@ public class SpaceLoggerGameTests {
 
             helper.assertTrue(firstBreakCount == 1, "expected exactly one break row at first fill target, actual=" + firstBreakCount);
             helper.assertTrue(secondBreakCount == 1, "expected exactly one break row at second fill target, actual=" + secondBreakCount);
+            helper.succeed();
+        });
+    }
+
+    @GameTest
+    public void recordsCommandHistoryWithoutSlashPrefix(GameTestHelper helper) {
+        long startTimeMs = System.currentTimeMillis();
+        ServerPlayer player = makeMockServerPlayerInLevel(helper);
+        player.setGameMode(GameType.SURVIVAL);
+        player.setPos(5.5D, 2.0D, 5.5D);
+
+        BlockPos commandPos = player.blockPosition();
+        String subject = NativeSpaceLoggerBridge.subject(player);
+        String fullCommand = "time set day";
+
+        CommandSourceStack commandSource = player.createCommandSourceStack()
+            .withPermission(PermissionSet.ALL_PERMISSIONS);
+        helper.getLevel().getServer().getCommands().performPrefixedCommand(commandSource, "/" + fullCommand);
+
+        helper.runAfterDelay(2, () -> {
+            var rows = SpaceLogger.bridge().queryRows(
+                subject,
+                "time",
+                mask(NativeSpaceLoggerBridge.VERB_COMMAND),
+                commandPos.getX(),
+                commandPos.getX(),
+                commandPos.getY(),
+                commandPos.getY(),
+                commandPos.getZ(),
+                commandPos.getZ(),
+                startTimeMs,
+                Long.MAX_VALUE,
+                8
+            );
+            helper.assertTrue(rows.size() == 1, "expected exactly one command row, actual=" + rows.size());
+
+            NativeSpaceLoggerBridge.QueryRow row = rows.getFirst();
+            helper.assertTrue(row.dataLen() == fullCommand.length(), "expected full command bytes to be stored");
+            helper.assertTrue(
+                java.util.Arrays.equals(row.dataHead(), fullCommand.getBytes(StandardCharsets.UTF_8)),
+                "expected command data to equal command text without leading slash"
+            );
             helper.succeed();
         });
     }

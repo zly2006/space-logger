@@ -40,7 +40,7 @@ public final class SpaceLoggerCommand {
     private static final Pattern HUMAN_DURATION_PATTERN = Pattern.compile("(\\d+)(ms|s|m|h|d|w)", Pattern.CASE_INSENSITIVE);
     private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS z");
     private static final List<String> FILTER_KEYS = List.of("subject", "object", "verb", "range", "limit", "page", "before", "after");
-    private static final List<String> VERB_SUGGESTIONS = List.of("hurt", "kill", "break", "place", "use", "add_item", "remove_item");
+    private static final List<String> VERB_SUGGESTIONS = List.of("hurt", "kill", "break", "place", "use", "add_item", "remove_item", "command");
     private static final List<String> RANGE_SUGGESTIONS = List.of("8", "16", "32", "64");
     private static final List<String> LIMIT_SUGGESTIONS = List.of("5", "10", "25", "50", "100");
     private static final List<String> PAGE_SUGGESTIONS = List.of("1", "2", "3", "4");

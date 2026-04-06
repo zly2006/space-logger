@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use space_logger::{
     DbOptions, IntPredicate, LongPredicate, Query, Row, SpaceLoggerDb, VERB_ADD_ITEM, VERB_BREAK,
-    VERB_KILL, VERB_PLACE, VERB_REMOVE_ITEM, VERB_USE, verb_mask_single,
+    VERB_COMMAND, VERB_KILL, VERB_PLACE, VERB_REMOVE_ITEM, VERB_USE, verb_mask_single,
 };
 
 const SEGMENT_V2_MAGIC: [u8; 8] = *b"SLSEGv2\0";
@@ -30,6 +30,7 @@ fn verb(name: &str) -> u32 {
         "add_item" => VERB_ADD_ITEM,
         "remove_item" => VERB_REMOVE_ITEM,
         "use" => VERB_USE,
+        "command" => VERB_COMMAND,
         _ => 31,
     }
 }

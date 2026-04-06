@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -51,6 +52,7 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
     public static final int VERB_USE = 4;
     public static final int VERB_ADD_ITEM = 5;
     public static final int VERB_REMOVE_ITEM = 6;
+    public static final int VERB_COMMAND = 7;
     public static final int VERB_MASK_ALL = -1;
 
     private static volatile boolean loaded;
@@ -326,6 +328,32 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
         return buffer.array();
     }
 
+    public static String normalizeCommand(String command) {
+        if (command == null) {
+            return "";
+        }
+        String normalized = command.trim();
+        while (normalized.startsWith("/")) {
+            normalized = normalized.substring(1).trim();
+        }
+        return normalized;
+    }
+
+    public static String commandObject(String normalizedCommand) {
+        if (normalizedCommand == null || normalizedCommand.isBlank()) {
+            return "";
+        }
+        int split = normalizedCommand.indexOf(' ');
+        return split < 0 ? normalizedCommand : normalizedCommand.substring(0, split);
+    }
+
+    public static byte[] encodeCommandData(String normalizedCommand) {
+        if (normalizedCommand == null || normalizedCommand.isBlank()) {
+            return new byte[0];
+        }
+        return normalizedCommand.getBytes(StandardCharsets.UTF_8);
+    }
+
     public static void markRecentPlace(Player player) {
         if (player == null) {
             return;
@@ -359,6 +387,7 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
             case "use" -> VERB_USE;
             case "add_item" -> VERB_ADD_ITEM;
             case "remove_item" -> VERB_REMOVE_ITEM;
+            case "command" -> VERB_COMMAND;
             default -> -1;
         };
     }
@@ -372,6 +401,7 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
             case VERB_USE -> "use";
             case VERB_ADD_ITEM -> "add_item";
             case VERB_REMOVE_ITEM -> "remove_item";
+            case VERB_COMMAND -> "command";
             default -> "unknown";
         };
     }

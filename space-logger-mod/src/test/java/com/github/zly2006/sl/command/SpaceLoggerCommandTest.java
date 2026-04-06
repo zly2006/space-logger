@@ -53,6 +53,10 @@ class SpaceLoggerCommandTest {
             List.of("verb:break,place"),
             SpaceLoggerCommand.completeFilterToken("verb:break,pl", "Alice")
         );
+        assertIterableEquals(
+            List.of("verb:command"),
+            SpaceLoggerCommand.completeFilterToken("verb:co", "Alice")
+        );
     }
 
     @Test
