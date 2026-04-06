@@ -1,7 +1,7 @@
-package com.github.zly2006.sl.mixin;
+package me.zly2006.sl.mixin;
 
-import com.github.zly2006.sl.SpaceLogger;
-import com.github.zly2006.sl.jni.NativeSpaceLoggerBridge;
+import me.zly2006.sl.SpaceLogger;
+import me.zly2006.sl.jni.NativeSpaceLoggerBridge;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.NonNullList;
 import net.minecraft.core.registries.BuiltInRegistries;

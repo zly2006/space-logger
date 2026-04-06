@@ -1,6 +1,6 @@
-package com.github.zly2006.sl.mixin;
+package me.zly2006.sl.mixin;
 
-import com.github.zly2006.sl.mixinhelper.RecordMixinHelper;
+import me.zly2006.sl.mixinhelper.RecordMixinHelper;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;

@@ -1,7 +1,7 @@
 {
   "required": true,
   "minVersion": "0.8",
-  "package": "com.github.zly2006.sl.mixin",
+  "package": "me.zly2006.sl.mixin",
   "compatibilityLevel": "JAVA_25",
   "mixins": [
     "AbstractContainerMenuMixin",

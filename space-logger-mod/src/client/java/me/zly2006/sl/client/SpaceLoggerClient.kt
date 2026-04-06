@@ -1,4 +1,4 @@
-package com.github.zly2006.sl.client
+package me.zly2006.sl.client
 
 import net.fabricmc.api.ClientModInitializer
 

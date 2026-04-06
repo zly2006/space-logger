@@ -1,4 +1,4 @@
-package com.github.zly2006.sl.command;
+package me.zly2006.sl.command;
 
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import java.util.List;

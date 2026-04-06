@@ -1,7 +1,7 @@
-package com.github.zly2006.sl.mixin;
+package me.zly2006.sl.mixin;
 
-import com.github.zly2006.sl.access.OperationCarrierAccess;
-import com.github.zly2006.sl.mixinhelper.RecordMixinHelper;
+import me.zly2006.sl.access.OperationCarrierAccess;
+import me.zly2006.sl.mixinhelper.RecordMixinHelper;
 import net.minecraft.world.level.ServerExplosion;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;

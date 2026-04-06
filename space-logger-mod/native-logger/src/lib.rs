@@ -68,7 +68,7 @@ fn data_head_12(data: &[u8]) -> &[u8] {
 
 fn to_java_query_row_array(env: &mut JNIEnv, rows: &[Row]) -> Result<jobjectArray, String> {
     let row_class = env
-        .find_class("com/github/zly2006/sl/jni/NativeSpaceLoggerBridge$QueryRow")
+        .find_class("me/zly2006/sl/jni/NativeSpaceLoggerBridge$QueryRow")
         .map_err(|e| format!("find QueryRow class failed: {e}"))?;
     let array: JObjectArray = env
         .new_object_array(rows.len() as jint, &row_class, JObject::null())
@@ -120,7 +120,7 @@ fn to_java_query_row_array(env: &mut JNIEnv, rows: &[Row]) -> Result<jobjectArra
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeCreate(
+pub extern "system" fn Java_me_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeCreate(
     mut env: JNIEnv,
     _class: JClass,
     db_dir: JString,
@@ -154,7 +154,7 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeClose(
+pub extern "system" fn Java_me_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeClose(
     _env: JNIEnv,
     _class: JClass,
     native_ptr: jlong,
@@ -171,7 +171,7 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeAppend(
+pub extern "system" fn Java_me_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeAppend(
     mut env: JNIEnv,
     _class: JClass,
     native_ptr: jlong,
@@ -270,7 +270,7 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeCountAll(
+pub extern "system" fn Java_me_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeCountAll(
     mut env: JNIEnv,
     _class: JClass,
     native_ptr: jlong,
@@ -305,7 +305,7 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeCountByVerb(
+pub extern "system" fn Java_me_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeCountByVerb(
     mut env: JNIEnv,
     _class: JClass,
     native_ptr: jlong,
@@ -350,7 +350,7 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeQuery(
+pub extern "system" fn Java_me_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeQuery(
     mut env: JNIEnv,
     _class: JClass,
     native_ptr: jlong,
@@ -458,7 +458,7 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeReset(
+pub extern "system" fn Java_me_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeReset(
     mut env: JNIEnv,
     _class: JClass,
     native_ptr: jlong,
@@ -514,7 +514,7 @@ pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_na
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_github_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeFlush(
+pub extern "system" fn Java_me_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeFlush(
     mut env: JNIEnv,
     _class: JClass,
     native_ptr: jlong,

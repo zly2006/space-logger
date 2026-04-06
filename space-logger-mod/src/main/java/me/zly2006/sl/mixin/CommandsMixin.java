@@ -1,6 +1,6 @@
-package com.github.zly2006.sl.mixin;
+package me.zly2006.sl.mixin;
 
-import com.github.zly2006.sl.mixinhelper.RecordMixinHelper;
+import me.zly2006.sl.mixinhelper.RecordMixinHelper;
 import com.mojang.brigadier.ParseResults;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;

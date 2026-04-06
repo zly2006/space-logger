@@ -1,4 +1,4 @@
-package com.github.zly2006.sl.jni;
+package me.zly2006.sl.jni;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;

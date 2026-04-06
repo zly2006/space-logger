@@ -1,7 +1,7 @@
-package com.github.zly2006.sl.command;
+package me.zly2006.sl.command;
 
-import com.github.zly2006.sl.SpaceLogger;
-import com.github.zly2006.sl.jni.NativeSpaceLoggerBridge;
+import me.zly2006.sl.SpaceLogger;
+import me.zly2006.sl.jni.NativeSpaceLoggerBridge;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;

@@ -1,7 +1,7 @@
 {
   "required": true,
   "minVersion": "0.8",
-  "package": "com.github.zly2006.sl.mixin.client",
+  "package": "me.zly2006.sl.mixin.client",
   "compatibilityLevel": "JAVA_25",
   "client": [
   ],

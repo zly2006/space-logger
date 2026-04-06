@@ -1,7 +1,7 @@
-package com.github.zly2006.sl
+package me.zly2006.sl
 
-import com.github.zly2006.sl.command.SpaceLoggerCommand
-import com.github.zly2006.sl.jni.NativeSpaceLoggerBridge
+import me.zly2006.sl.command.SpaceLoggerCommand
+import me.zly2006.sl.jni.NativeSpaceLoggerBridge
 import net.fabricmc.api.ModInitializer
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents
 import net.fabricmc.loader.api.FabricLoader

@@ -1,10 +1,10 @@
-package com.github.zly2006.sl.mixinhelper;
+package me.zly2006.sl.mixinhelper;
 
 import java.util.ArrayDeque;
 
-import com.github.zly2006.sl.SpaceLogger;
-import com.github.zly2006.sl.access.OperationCarrierAccess;
-import com.github.zly2006.sl.jni.NativeSpaceLoggerBridge;
+import me.zly2006.sl.SpaceLogger;
+import me.zly2006.sl.access.OperationCarrierAccess;
+import me.zly2006.sl.jni.NativeSpaceLoggerBridge;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.block.state.BlockState;

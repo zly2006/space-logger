@@ -1,13 +1,20 @@
-package com.github.zly2006.sl.gametest;
+package me.zly2006.sl.gametest;
 
-import com.github.zly2006.sl.SpaceLogger;
-import com.github.zly2006.sl.jni.NativeSpaceLoggerBridge;
+import com.mojang.authlib.GameProfile;
+import io.netty.channel.ChannelHandler;
+import io.netty.channel.embedded.EmbeddedChannel;
+import me.zly2006.sl.SpaceLogger;
+import me.zly2006.sl.jni.NativeSpaceLoggerBridge;
 import net.fabricmc.fabric.api.gametest.v1.GameTest;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.gametest.framework.GameTestHelper;
+import net.minecraft.network.Connection;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.protocol.PacketFlow;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.network.CommonListenerCookie;
 import net.minecraft.server.permissions.PermissionSet;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
@@ -24,6 +31,9 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.entity.monster.zombie.Zombie;
 
+import java.util.Objects;
+import java.util.UUID;
+
 public class SpaceLoggerGameTests {
     private static int mask(int verbId) {
         return NativeSpaceLoggerBridge.verbMaskSingle(verbId);
@@ -35,7 +45,7 @@ public class SpaceLoggerGameTests {
         int killBefore = SpaceLogger.bridge().countByVerb(NativeSpaceLoggerBridge.VERB_KILL);
         int noMatchBefore = SpaceLogger.bridge().countByVerb(-1);
 
-        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        ServerPlayer player = makeMockServerPlayerInLevel(helper);
         player.setGameMode(GameType.SURVIVAL);
 
         net.minecraft.world.entity.monster.zombie.Zombie zombie = helper.spawn(EntityType.ZOMBIE, new BlockPos(1, 1, 1));
@@ -58,7 +68,7 @@ public class SpaceLoggerGameTests {
         int noMatchBefore = SpaceLogger.bridge().countByVerb(-1);
         long startTimeMs = System.currentTimeMillis();
 
-        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        ServerPlayer player = makeMockServerPlayerInLevel(helper);
         player.setGameMode(GameType.SURVIVAL);
 
         BlockPos placePos = new BlockPos(1, 1, 1);
@@ -175,7 +185,7 @@ public class SpaceLoggerGameTests {
         int noMatchBefore = SpaceLogger.bridge().countByVerb(-1);
         long startTimeMs = System.currentTimeMillis();
 
-        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        ServerPlayer player = makeMockServerPlayerInLevel(helper);
         player.setGameMode(GameType.SURVIVAL);
 
         BlockPos chestPos = new BlockPos(1, 1, 1);
@@ -294,7 +304,7 @@ public class SpaceLoggerGameTests {
     @GameTest
     public void recordsAttachedTorchWhenSupportingBlockBroken(GameTestHelper helper) {
         long startTimeMs = System.currentTimeMillis();
-        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        ServerPlayer player = makeMockServerPlayerInLevel(helper);
         player.setGameMode(GameType.SURVIVAL);
 
         BlockPos supportPos = new BlockPos(1, 1, 1);
@@ -349,10 +359,27 @@ public class SpaceLoggerGameTests {
         });
     }
 
+    public static ServerPlayer makeMockServerPlayerInLevel(GameTestHelper helper) {
+        CommonListenerCookie cookie = CommonListenerCookie.createInitial(new GameProfile(UUID.randomUUID(), "MockPlayer" + (System.currentTimeMillis() % 1000)), false);
+        ServerPlayer player = new ServerPlayer(helper.getLevel().getServer(), helper.getLevel(), cookie.gameProfile(), cookie.clientInformation()) {
+            {
+                Objects.requireNonNull(helper);
+            }
+
+            public GameType gameMode() {
+                return GameType.CREATIVE;
+            }
+        };
+        Connection connection = new Connection(PacketFlow.SERVERBOUND);
+        new EmbeddedChannel(new ChannelHandler[]{connection});
+        helper.getLevel().getServer().getPlayerList().placeNewPlayer(connection, player, cookie);
+        return player;
+    }
+
     @GameTest(maxTicks = 160)
     public void recordsChainTntBreakForIgnitingPlayer(GameTestHelper helper) {
         long startTimeMs = System.currentTimeMillis();
-        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        ServerPlayer player = makeMockServerPlayerInLevel(helper);
         player.setGameMode(GameType.SURVIVAL);
 
         BlockPos tnt1Pos = new BlockPos(1, 2, 1);
@@ -429,7 +456,7 @@ public class SpaceLoggerGameTests {
     @GameTest
     public void recordsFillCommandBreaksBlocksForPlayer(GameTestHelper helper) {
         long startTimeMs = System.currentTimeMillis();
-        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        ServerPlayer player = makeMockServerPlayerInLevel(helper);
         player.setGameMode(GameType.SURVIVAL);
 
         BlockPos firstPos = new BlockPos(1, 1, 1);
@@ -483,7 +510,7 @@ public class SpaceLoggerGameTests {
     @GameTest
     public void flushMergesContinuousRemoveThenAdd(GameTestHelper helper) {
         long startTimeMs = System.currentTimeMillis();
-        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        ServerPlayer player = makeMockServerPlayerInLevel(helper);
         player.setGameMode(GameType.SURVIVAL);
 
         BlockPos absPos = helper.absolutePos(new BlockPos(6, 1, 6));
@@ -553,7 +580,7 @@ public class SpaceLoggerGameTests {
     @GameTest
     public void flushDoesNotMergeAcrossUseBarrier(GameTestHelper helper) {
         long startTimeMs = System.currentTimeMillis();
-        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        ServerPlayer player = makeMockServerPlayerInLevel(helper);
         player.setGameMode(GameType.SURVIVAL);
 
         BlockPos absPos = helper.absolutePos(new BlockPos(7, 1, 7));
