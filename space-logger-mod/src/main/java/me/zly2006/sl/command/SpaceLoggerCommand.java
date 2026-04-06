@@ -204,7 +204,12 @@ public final class SpaceLoggerCommand {
             .atZone(ZoneId.systemDefault())
             .format(TIME_FORMATTER);
         String relative = formatRelativeTime(row.timeMs(), nowMs);
-        String coordText = "@ " + row.dimension() + " " + row.x() + "," + row.y() + "," + row.z();
+        String coordText = "@" + switch (row.dimension()) {
+            case "overworld" -> "O";
+            case "the_nether" -> "N";
+            case "the_end" -> "E";
+            default -> row.dimension();
+        } + " " + row.x() + "," + row.y() + "," + row.z();
         String tpCommand = "/sl tp " + row.x() + " " + row.y() + " " + row.z();
 
         MutableComponent line = Component.empty();

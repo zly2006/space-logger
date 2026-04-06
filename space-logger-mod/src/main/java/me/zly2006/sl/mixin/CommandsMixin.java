@@ -28,7 +28,7 @@ public abstract class CommandsMixin {
             CommandSourceStack source = parseResults.getContext().getSource();
             String normalizedCommand = NativeSpaceLoggerBridge.normalizeCommand(command);
             // 过滤掉空命令和本模组查询日志的命令，避免死循环
-            if (!normalizedCommand.isBlank() && !normalizedCommand.startsWith("sl q ")) {
+            if (!normalizedCommand.isBlank() && !normalizedCommand.startsWith("sl q")) {
                 BlockPos pos = BlockPos.containing(source.getPosition());
                 SpaceLogger.bridge().appendNow(
                     pos.getX(),
