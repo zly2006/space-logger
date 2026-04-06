@@ -168,6 +168,7 @@ public abstract class AbstractContainerMenuMixin {
             pos.getX(),
             pos.getY(),
             pos.getZ(),
+            NativeSpaceLoggerBridge.dimension(player.level()),
             NativeSpaceLoggerBridge.subject(player),
             verb,
             NativeSpaceLoggerBridge.itemId(stack),

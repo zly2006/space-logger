@@ -27,11 +27,13 @@ import net.minecraft.nbt.NbtIo;
 import net.minecraft.nbt.NbtOps;
 import net.minecraft.nbt.Tag;
 import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.RegistryOps;
 import net.minecraft.util.ProblemReporter;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.storage.TagValueOutput;
 import org.slf4j.Logger;
@@ -108,6 +110,7 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
         int x,
         int y,
         int z,
+        String dimension,
         String subject,
         int verb,
         String object,
@@ -121,6 +124,7 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
             x,
             y,
             z,
+            safe(dimension),
             safe(subject),
             verb,
             safe(object),
@@ -137,13 +141,14 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
         int x,
         int y,
         int z,
+        String dimension,
         String subject,
         int verb,
         String object,
         String subjectExtra,
         byte[] data
     ) {
-        append(x, y, z, subject, verb, object, System.currentTimeMillis(), subjectExtra, data);
+        append(x, y, z, dimension, subject, verb, object, System.currentTimeMillis(), subjectExtra, data);
     }
 
     public int countAll() {
@@ -155,6 +160,7 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
     }
 
     public List<QueryRow> queryRows(
+        String dimension,
         String subject,
         String object,
         int verbMask,
@@ -171,6 +177,7 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
         int safeLimit = limit <= 0 ? 20 : limit;
         QueryRow[] rows = nativeQuery(
             requireNativePtr(),
+            safe(dimension),
             safe(subject),
             safe(object),
             verbMask,
@@ -199,6 +206,10 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
         if (!ok) {
             throw new IllegalStateException("native flush returned false");
         }
+    }
+
+    public DbStats stats(int latestSegmentLimit) {
+        return nativeStats(requireNativePtr(), latestSegmentLimit);
     }
 
     private static void ensureNativeLoaded(Path gameDir) {
@@ -245,6 +256,14 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
 
     public static String subject(Player player) {
         return player.getScoreboardName();
+    }
+
+    public static String dimension(Level level) {
+        return level == null ? "unknown" : normalizeIdentifier(level.dimension().identifier());
+    }
+
+    public static String dimension(ResourceKey<Level> dimension) {
+        return dimension == null ? "unknown" : normalizeIdentifier(dimension.identifier());
     }
 
     public static String subjectExtra(Player player) {
@@ -472,6 +491,7 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
         int x,
         int y,
         int z,
+        String dimension,
         String subject,
         int verb,
         String object,
@@ -486,6 +506,7 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
 
     private static native QueryRow[] nativeQuery(
         long nativePtr,
+        String dimension,
         String subject,
         String object,
         int verbMask,
@@ -504,11 +525,14 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
 
     private static native boolean nativeFlush(long nativePtr);
 
+    private static native DbStats nativeStats(long nativePtr, int latestSegmentLimit);
+
     public record QueryRow(
         long timeMs,
         int x,
         int y,
         int z,
+        String dimension,
         String subject,
         int verb,
         String object,
@@ -551,4 +575,31 @@ public final class NativeSpaceLoggerBridge implements AutoCloseable {
             return ByteBuffer.wrap(dataHead, 8, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
         }
     }
+
+    public record SegmentStats(
+        long id,
+        String fileName,
+        int rowCount,
+        long minSeq,
+        long maxSeq,
+        long minTimeMs,
+        long maxTimeMs,
+        long sizeBytes,
+        int minX,
+        int maxX,
+        int minY,
+        int maxY,
+        int minZ,
+        int maxZ
+    ) {}
+
+    public record DbStats(
+        int schemaVersion,
+        int totalRows,
+        int memtableRows,
+        int segmentCount,
+        long walSizeBytes,
+        long diskUsageBytes,
+        SegmentStats[] latestSegments
+    ) {}
 }

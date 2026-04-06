@@ -93,6 +93,7 @@ public abstract class ServerPlayerGameModeMixin {
             pos.getX(),
             pos.getY(),
             pos.getZ(),
+            NativeSpaceLoggerBridge.dimension(this.level),
             NativeSpaceLoggerBridge.subject(player),
             NativeSpaceLoggerBridge.VERB_USE,
             NativeSpaceLoggerBridge.blockId(state),

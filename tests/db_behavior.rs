@@ -39,11 +39,20 @@ fn verb_mask(name: &str) -> u32 {
     verb_mask_single(verb(name))
 }
 
+fn dimension_for_seed(seed: i32) -> String {
+    match seed.rem_euclid(3) {
+        0 => "overworld".to_string(),
+        1 => "the_nether".to_string(),
+        _ => "the_end".to_string(),
+    }
+}
+
 fn sample_row(seed: i32) -> Row {
     Row {
         x: seed,
         y: seed + 1,
         z: seed + 2,
+        dimension: "overworld".to_string(),
         subject: format!("subject-{seed}"),
         object: format!("object-{seed}"),
         verb: verb("click"),
@@ -77,6 +86,7 @@ fn varied_row(seed: i32) -> Row {
         x: (seed * 37) % 2000 - 1000,
         y: (seed * 19) % 2000 - 1000,
         z: (seed * 11) % 2000 - 1000,
+        dimension: dimension_for_seed(seed),
         subject,
         object,
         verb: verb(verb_name),
@@ -157,6 +167,10 @@ fn row_matches_query(row: &Row, query: &Query) -> bool {
     matches_int_predicate(row.x, &query.x)
         && matches_int_predicate(row.y, &query.y)
         && matches_int_predicate(row.z, &query.z)
+        && query
+            .dimension
+            .as_ref()
+            .is_none_or(|dimension| row.dimension == *dimension)
         && matches_long_predicate(row.time_ms, &query.time_ms)
         && query
             .subject
@@ -1113,6 +1127,82 @@ fn same_location_object_kill_limit_keeps_latest_kill_records() {
 }
 
 #[test]
+fn same_location_kill_limit_is_scoped_by_dimension() {
+    let db_dir = fresh_db_dir("same_location_kill_limit_is_scoped_by_dimension");
+    let db = SpaceLoggerDb::open(
+        &db_dir,
+        DbOptions {
+            memtable_flush_rows: 3,
+            same_location_kill_limit: 2,
+            ..DbOptions::default()
+        },
+    )
+    .expect("open should succeed");
+
+    for seed in 0..6 {
+        let version = db.current_version();
+        let mut row = sample_row(seed);
+        row.x = 123;
+        row.y = 456;
+        row.z = 789;
+        row.dimension = if seed < 3 {
+            "overworld".to_string()
+        } else {
+            "the_nether".to_string()
+        };
+        row.verb = verb("kill");
+        row.object = "zombie".to_string();
+        row.subject = format!("killer-{seed}");
+        db.insert_with_version(row, version)
+            .expect("insert should succeed");
+    }
+
+    db.flush().expect("flush should succeed");
+    db.compact().expect("compact should succeed");
+
+    let base_query = Query {
+        x: Some(IntPredicate {
+            eq: Some(123),
+            ..IntPredicate::default()
+        }),
+        y: Some(IntPredicate {
+            eq: Some(456),
+            ..IntPredicate::default()
+        }),
+        z: Some(IntPredicate {
+            eq: Some(789),
+            ..IntPredicate::default()
+        }),
+        object: Some("zombie".to_string()),
+        verb_mask: verb_mask("kill"),
+        ..Query::default()
+    };
+    let overworld_rows = db
+        .query(
+            &Query {
+                dimension: Some("overworld".to_string()),
+                ..base_query.clone()
+            },
+            None,
+        )
+        .expect("overworld query should succeed");
+    let nether_rows = db
+        .query(
+            &Query {
+                dimension: Some("the_nether".to_string()),
+                ..base_query
+            },
+            None,
+        )
+        .expect("nether query should succeed");
+
+    assert_eq!(overworld_rows.len(), 2, "kill limit should apply independently in overworld");
+    assert_eq!(nether_rows.len(), 2, "kill limit should apply independently in nether");
+
+    std::fs::remove_dir_all(db_dir).ok();
+}
+
+#[test]
 fn disable_background_maintenance_keeps_segment_fanout() {
     let db_dir = fresh_db_dir("disable_background_maintenance_keeps_segment_fanout");
     let db = SpaceLoggerDb::open(
@@ -1238,6 +1328,7 @@ fn flush_merges_continuous_remove_then_add_item_rows() {
         x: 10,
         y: 64,
         z: 10,
+        dimension: "overworld".to_string(),
         subject: "alice".to_string(),
         object: "dirt".to_string(),
         verb: verb("remove_item"),
@@ -1249,6 +1340,7 @@ fn flush_merges_continuous_remove_then_add_item_rows() {
         x: 10,
         y: 64,
         z: 10,
+        dimension: "overworld".to_string(),
         subject: "alice".to_string(),
         object: "dirt".to_string(),
         verb: verb("add_item"),
@@ -1331,6 +1423,7 @@ fn flush_does_not_merge_when_non_item_operation_breaks_sequence() {
             x: 20,
             y: 70,
             z: 20,
+            dimension: "overworld".to_string(),
             subject: "alice".to_string(),
             object: "dirt".to_string(),
             verb: verb("remove_item"),
@@ -1342,6 +1435,7 @@ fn flush_does_not_merge_when_non_item_operation_breaks_sequence() {
             x: 20,
             y: 70,
             z: 20,
+            dimension: "overworld".to_string(),
             subject: "alice".to_string(),
             object: "stone".to_string(),
             verb: verb("use"),
@@ -1353,6 +1447,7 @@ fn flush_does_not_merge_when_non_item_operation_breaks_sequence() {
             x: 20,
             y: 70,
             z: 20,
+            dimension: "overworld".to_string(),
             subject: "alice".to_string(),
             object: "dirt".to_string(),
             verb: verb("add_item"),
@@ -1416,6 +1511,150 @@ fn flush_does_not_merge_when_non_item_operation_breaks_sequence() {
         .query(&no_match_query(), None)
         .expect("query should work");
     assert_eq!(fail.len(), 0, "failure case should have no rows");
+
+    std::fs::remove_dir_all(db_dir).ok();
+}
+
+#[test]
+fn query_same_xyz_isolated_by_dimension() {
+    let db_dir = fresh_db_dir("dimension_query");
+    let db = SpaceLoggerDb::open(&db_dir, DbOptions::default()).expect("open should succeed");
+
+    let overworld_row = Row {
+        x: 12,
+        y: 64,
+        z: 12,
+        dimension: "overworld".to_string(),
+        subject: "alice".to_string(),
+        object: "stone".to_string(),
+        verb: VERB_BREAK,
+        time_ms: 1_800_000_000_101,
+        subject_extra: "uuid-alice".to_string(),
+        data: vec![],
+    };
+    let nether_row = Row {
+        x: 12,
+        y: 64,
+        z: 12,
+        dimension: "the_nether".to_string(),
+        subject: "alice".to_string(),
+        object: "stone".to_string(),
+        verb: VERB_BREAK,
+        time_ms: 1_800_000_000_102,
+        subject_extra: "uuid-alice".to_string(),
+        data: vec![],
+    };
+
+    let version = db.current_version();
+    db.insert_with_version(overworld_row, version)
+        .expect("insert overworld row should succeed");
+    let version = db.current_version();
+    db.insert_with_version(nether_row, version)
+        .expect("insert nether row should succeed");
+
+    let overworld_query = Query {
+        x: Some(IntPredicate {
+            eq: Some(12),
+            ..IntPredicate::default()
+        }),
+        y: Some(IntPredicate {
+            eq: Some(64),
+            ..IntPredicate::default()
+        }),
+        z: Some(IntPredicate {
+            eq: Some(12),
+            ..IntPredicate::default()
+        }),
+        dimension: Some("overworld".to_string()),
+        ..Query::default()
+    };
+    let nether_query = Query {
+        dimension: Some("the_nether".to_string()),
+        ..overworld_query.clone()
+    };
+
+    let overworld_rows = db
+        .query(&overworld_query, None)
+        .expect("overworld query should succeed");
+    let nether_rows = db
+        .query(&nether_query, None)
+        .expect("nether query should succeed");
+
+    assert_eq!(overworld_rows.len(), 1, "overworld query should isolate dimension");
+    assert_eq!(overworld_rows[0].dimension, "overworld");
+    assert_eq!(nether_rows.len(), 1, "nether query should isolate dimension");
+    assert_eq!(nether_rows[0].dimension, "the_nether");
+
+    std::fs::remove_dir_all(db_dir).ok();
+}
+
+#[test]
+fn incompatible_db_without_schema_is_backed_up_and_reinitialized() {
+    let db_dir = fresh_db_dir("schema_migration");
+    std::fs::create_dir_all(db_dir.join("segments")).expect("create old segments dir");
+    std::fs::write(db_dir.join("wal.log"), b"legacy-wal").expect("write old wal");
+    std::fs::write(db_dir.join("segments").join("segment_1.bin"), b"legacy-segment")
+        .expect("write old segment");
+
+    let db = SpaceLoggerDb::open(&db_dir, DbOptions::default()).expect("open should auto-migrate");
+    let rows = db.query(&Query::default(), None).expect("empty query should succeed");
+    assert!(rows.is_empty(), "auto-migrated db should start empty");
+
+    let schema_marker = std::fs::read_to_string(db_dir.join("schema_version"))
+        .expect("new schema marker should exist");
+    assert_eq!(schema_marker.trim(), "2");
+
+    let parent = db_dir.parent().expect("db dir should have parent");
+    let backup_name = db_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("db dir file name")
+        .to_string();
+    let backups = std::fs::read_dir(parent)
+        .expect("list parent dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with(&(backup_name.clone() + ".pre-dimension-schema-"))
+                })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(backups.len(), 1, "expected exactly one backup directory");
+    assert!(backups[0].join("wal.log").exists(), "backup should preserve old wal");
+
+    std::fs::remove_dir_all(&db_dir).ok();
+    std::fs::remove_dir_all(&backups[0]).ok();
+}
+
+#[test]
+fn stats_reports_row_and_segment_summary() {
+    let db_dir = fresh_db_dir("stats_reports_row_and_segment_summary");
+    let db = SpaceLoggerDb::open(
+        &db_dir,
+        DbOptions {
+            memtable_flush_rows: 2,
+            enable_background_maintenance: false,
+            ..DbOptions::default()
+        },
+    )
+    .expect("open should succeed");
+
+    for seed in 0..5 {
+        let version = db.current_version();
+        db.insert_with_version(sample_row(seed), version)
+            .expect("insert should succeed");
+    }
+
+    let stats = db.stats(5).expect("stats should succeed");
+    assert_eq!(stats.schema_version, 2);
+    assert_eq!(stats.total_rows, 5);
+    assert_eq!(stats.segment_count, 2, "5 rows with flush_rows=2 should leave two persisted segments");
+    assert_eq!(stats.memtable_rows, 1, "one row should remain in memtable");
+    assert_eq!(stats.latest_segments.len(), 2, "latest segment list should include persisted segments");
+    assert!(stats.disk_usage_bytes > 0, "disk usage should include db files");
 
     std::fs::remove_dir_all(db_dir).ok();
 }

@@ -34,6 +34,7 @@ public abstract class CommandsMixin {
                     pos.getX(),
                     pos.getY(),
                     pos.getZ(),
+                    NativeSpaceLoggerBridge.dimension(source.getLevel()),
                     NativeSpaceLoggerBridge.subject(player),
                     NativeSpaceLoggerBridge.VERB_COMMAND,
                     NativeSpaceLoggerBridge.commandObject(normalizedCommand),

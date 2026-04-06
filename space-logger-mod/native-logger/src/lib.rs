@@ -5,7 +5,7 @@ use std::sync::RwLock;
 
 use jni::JNIEnv;
 use jni::objects::{JByteArray, JClass, JObject, JObjectArray, JString, JValue};
-use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jint, jlong, jobjectArray};
+use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jint, jlong, jobject, jobjectArray};
 use space_logger::{
     DbError, DbOptions, IntPredicate, LongPredicate, Query, Row, SpaceLoggerDb, verb_mask_single,
 };
@@ -78,6 +78,9 @@ fn to_java_query_row_array(env: &mut JNIEnv, rows: &[Row]) -> Result<jobjectArra
         let jsubject = env
             .new_string(&row.subject)
             .map_err(|e| format!("create subject string failed: {e}"))?;
+        let jdimension = env
+            .new_string(&row.dimension)
+            .map_err(|e| format!("create dimension string failed: {e}"))?;
         let jobject = env
             .new_string(&row.object)
             .map_err(|e| format!("create object string failed: {e}"))?;
@@ -89,6 +92,7 @@ fn to_java_query_row_array(env: &mut JNIEnv, rows: &[Row]) -> Result<jobjectArra
             .map_err(|e| format!("create dataHead byte[] failed: {e}"))?;
 
         let jsubject_obj = JObject::from(jsubject);
+        let jdimension_obj = JObject::from(jdimension);
         let jobject_obj = JObject::from(jobject);
         let jsubject_extra_obj = JObject::from(jsubject_extra);
         let jdata_head_obj = JObject::from(jdata_head);
@@ -96,12 +100,13 @@ fn to_java_query_row_array(env: &mut JNIEnv, rows: &[Row]) -> Result<jobjectArra
         let jrow = env
             .new_object(
                 &row_class,
-                "(JIIILjava/lang/String;ILjava/lang/String;Ljava/lang/String;I[B)V",
+                "(JIIILjava/lang/String;Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;I[B)V",
                 &[
                     JValue::Long(row.time_ms),
                     JValue::Int(row.x),
                     JValue::Int(row.y),
                     JValue::Int(row.z),
+                    JValue::Object(&jdimension_obj),
                     JValue::Object(&jsubject_obj),
                     JValue::Int((row.verb & 0x7fff_ffff) as jint),
                     JValue::Object(&jobject_obj),
@@ -117,6 +122,78 @@ fn to_java_query_row_array(env: &mut JNIEnv, rows: &[Row]) -> Result<jobjectArra
     }
 
     Ok(array.into_raw())
+}
+
+fn to_java_segment_stats_array(
+    env: &mut JNIEnv,
+    segments: &[space_logger::SegmentStats],
+) -> Result<jobjectArray, String> {
+    let stats_class = env
+        .find_class("me/zly2006/sl/jni/NativeSpaceLoggerBridge$SegmentStats")
+        .map_err(|e| format!("find SegmentStats class failed: {e}"))?;
+    let array: JObjectArray = env
+        .new_object_array(segments.len() as jint, &stats_class, JObject::null())
+        .map_err(|e| format!("create SegmentStats[] failed: {e}"))?;
+
+    for (idx, segment) in segments.iter().enumerate() {
+        let jfile_name = env
+            .new_string(&segment.file_name)
+            .map_err(|e| format!("create segment file_name failed: {e}"))?;
+        let jfile_name_obj = JObject::from(jfile_name);
+        let jobject = env
+            .new_object(
+                &stats_class,
+                "(JLjava/lang/String;IJJJJJIIIIII)V",
+                &[
+                    JValue::Long(segment.id as jlong),
+                    JValue::Object(&jfile_name_obj),
+                    JValue::Int(segment.row_count.min(i32::MAX as usize) as jint),
+                    JValue::Long(segment.min_seq as jlong),
+                    JValue::Long(segment.max_seq as jlong),
+                    JValue::Long(segment.min_time_ms),
+                    JValue::Long(segment.max_time_ms),
+                    JValue::Long(segment.size_bytes.min(i64::MAX as u64) as jlong),
+                    JValue::Int(segment.min_x),
+                    JValue::Int(segment.max_x),
+                    JValue::Int(segment.min_y),
+                    JValue::Int(segment.max_y),
+                    JValue::Int(segment.min_z),
+                    JValue::Int(segment.max_z),
+                ],
+            )
+            .map_err(|e| format!("create SegmentStats object failed: {e}"))?;
+        env.set_object_array_element(&array, idx as jint, jobject)
+            .map_err(|e| format!("set SegmentStats[] element failed: {e}"))?;
+    }
+
+    Ok(array.into_raw())
+}
+
+fn to_java_db_stats(
+    env: &mut JNIEnv,
+    stats: &space_logger::DbStats,
+) -> Result<jobject, String> {
+    let db_stats_class = env
+        .find_class("me/zly2006/sl/jni/NativeSpaceLoggerBridge$DbStats")
+        .map_err(|e| format!("find DbStats class failed: {e}"))?;
+    let segment_array = to_java_segment_stats_array(env, &stats.latest_segments)?;
+    let segment_array_obj = unsafe { JObject::from_raw(segment_array) };
+
+    env.new_object(
+        &db_stats_class,
+        "(IIIIJJ[Lme/zly2006/sl/jni/NativeSpaceLoggerBridge$SegmentStats;)V",
+        &[
+            JValue::Int(stats.schema_version as jint),
+            JValue::Int(stats.total_rows.min(i32::MAX as usize) as jint),
+            JValue::Int(stats.memtable_rows.min(i32::MAX as usize) as jint),
+            JValue::Int(stats.segment_count.min(i32::MAX as usize) as jint),
+            JValue::Long(stats.wal_size_bytes.min(i64::MAX as u64) as jlong),
+            JValue::Long(stats.disk_usage_bytes.min(i64::MAX as u64) as jlong),
+            JValue::Object(&segment_array_obj),
+        ],
+    )
+    .map(|obj| obj.into_raw())
+    .map_err(|e| format!("create DbStats object failed: {e}"))
 }
 
 #[unsafe(no_mangle)]
@@ -178,6 +255,7 @@ pub extern "system" fn Java_me_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeAppe
     x: jint,
     y: jint,
     z: jint,
+    dimension: JString,
     subject: JString,
     verb: jint,
     object: JString,
@@ -185,6 +263,13 @@ pub extern "system" fn Java_me_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeAppe
     subject_extra: JString,
     data: JByteArray,
 ) -> jboolean {
+    let dimension = match jstring_to_string(&mut env, dimension) {
+        Ok(v) => v,
+        Err(e) => {
+            throw_runtime(&mut env, e);
+            return JNI_FALSE;
+        }
+    };
     let subject = match jstring_to_string(&mut env, subject) {
         Ok(v) => v,
         Err(e) => {
@@ -222,6 +307,7 @@ pub extern "system" fn Java_me_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeAppe
         x,
         y,
         z,
+        dimension,
         subject,
         object,
         verb: verb as u32,
@@ -354,6 +440,7 @@ pub extern "system" fn Java_me_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeQuer
     mut env: JNIEnv,
     _class: JClass,
     native_ptr: jlong,
+    dimension: JString,
     subject: JString,
     object: JString,
     verb_mask: jint,
@@ -367,6 +454,13 @@ pub extern "system" fn Java_me_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeQuer
     before_time_ms: jlong,
     limit: jint,
 ) -> jobjectArray {
+    let dimension = match jstring_to_string(&mut env, dimension) {
+        Ok(v) => v,
+        Err(e) => {
+            throw_runtime(&mut env, e);
+            return ptr::null_mut();
+        }
+    };
     let subject = match jstring_to_string(&mut env, subject) {
         Ok(v) => v,
         Err(e) => {
@@ -382,6 +476,7 @@ pub extern "system" fn Java_me_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeQuer
         }
     };
     let mut query = Query {
+        dimension: non_empty(dimension),
         subject: non_empty(subject),
         object: non_empty(object),
         verb_mask: verb_mask as u32,
@@ -544,6 +639,51 @@ pub extern "system" fn Java_me_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeFlus
         Err(e) => {
             throw_runtime(&mut env, format!("flush failed: {e}"));
             JNI_FALSE
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_me_zly2006_sl_jni_NativeSpaceLoggerBridge_nativeStats(
+    mut env: JNIEnv,
+    _class: JClass,
+    native_ptr: jlong,
+    latest_segment_limit: jint,
+) -> jobject {
+    let native = match handle_from_ptr(native_ptr) {
+        Ok(handle) => handle,
+        Err(e) => {
+            throw_runtime(&mut env, e);
+            return ptr::null_mut();
+        }
+    };
+
+    let guard = match native.db.read() {
+        Ok(lock) => lock,
+        Err(_) => {
+            throw_runtime(&mut env, "native db lock poisoned");
+            return ptr::null_mut();
+        }
+    };
+    let Some(db) = guard.as_ref() else {
+        throw_runtime(&mut env, "native db is not initialized");
+        return ptr::null_mut();
+    };
+
+    let safe_limit = latest_segment_limit.max(0) as usize;
+    let stats = match db.stats(safe_limit) {
+        Ok(stats) => stats,
+        Err(e) => {
+            throw_runtime(&mut env, format!("stats failed: {e}"));
+            return ptr::null_mut();
+        }
+    };
+
+    match to_java_db_stats(&mut env, &stats) {
+        Ok(stats) => stats,
+        Err(e) => {
+            throw_runtime(&mut env, e);
+            ptr::null_mut()
         }
     }
 }

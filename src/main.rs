@@ -34,6 +34,8 @@ enum Command {
         x: i32,
         y: i32,
         z: i32,
+        #[arg(long, default_value = "overworld")]
+        dimension: String,
         subject: String,
         verb: String,
         object: String,
@@ -105,6 +107,7 @@ fn run() -> Result<(), CliError> {
             x,
             y,
             z,
+            dimension,
             subject,
             verb,
             object,
@@ -118,6 +121,7 @@ fn run() -> Result<(), CliError> {
                 x,
                 y,
                 z,
+                dimension,
                 subject,
                 object,
                 verb,
@@ -137,7 +141,8 @@ fn run() -> Result<(), CliError> {
             println!("matched_rows={}", rows.len());
             for row in rows {
                 println!(
-                    "x={} y={} z={} subject={} verb={} object={} time_ms={} subject_extra={} data_hex={}",
+                    "dimension={} x={} y={} z={} subject={} verb={} object={} time_ms={} subject_extra={} data_hex={}",
+                    row.dimension,
                     row.x,
                     row.y,
                     row.z,
@@ -197,6 +202,15 @@ fn parse_query_filters(filters: &[String]) -> Result<Query, CliError> {
             "x" | "y" | "z" => {
                 let predicate = int_predicate_slot(&mut query, field.as_str());
                 parse_int_operator(predicate, &op, filters, &mut index, field.as_str())?;
+            }
+            "dimension" => {
+                let value = next_token(filters, &mut index, "dimension value")?.to_string();
+                if op != "=" && op != "==" {
+                    return Err(CliError::Usage(
+                        "dimension only supports `=` operator".to_string(),
+                    ));
+                }
+                assign_string_field(&mut query.dimension, value, "dimension")?;
             }
             "time" | "time_ms" => {
                 let predicate = query.time_ms.get_or_insert_with(LongPredicate::default);

@@ -39,8 +39,9 @@ public final class SpaceLoggerCommand {
     private static final int MAX_LIMIT = 200;
     private static final Pattern HUMAN_DURATION_PATTERN = Pattern.compile("(\\d+)(ms|s|m|h|d|w)", Pattern.CASE_INSENSITIVE);
     private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS z");
-    private static final List<String> FILTER_KEYS = List.of("subject", "object", "verb", "range", "limit", "page", "before", "after");
+    private static final List<String> FILTER_KEYS = List.of("subject", "object", "verb", "dimension", "range", "limit", "page", "before", "after");
     private static final List<String> VERB_SUGGESTIONS = List.of("hurt", "kill", "break", "place", "use", "add_item", "remove_item", "command");
+    private static final List<String> DIMENSION_SUGGESTIONS = List.of("overworld", "the_nether", "the_end");
     private static final List<String> RANGE_SUGGESTIONS = List.of("8", "16", "32", "64");
     private static final List<String> LIMIT_SUGGESTIONS = List.of("5", "10", "25", "50", "100");
     private static final List<String> PAGE_SUGGESTIONS = List.of("1", "2", "3", "4");
@@ -84,6 +85,10 @@ public final class SpaceLoggerCommand {
                                     .executes(ctx -> executeQuery(ctx.getSource(), StringArgumentType.getString(ctx, "filters")))
                             )
                     )
+                    .then(
+                        Commands.literal("stat")
+                            .executes(ctx -> executeStat(ctx.getSource()))
+                    )
             )
         );
     }
@@ -107,6 +112,7 @@ public final class SpaceLoggerCommand {
         ParsedFilters filters = parseFilters(filterText, player);
         QueryPagination pagination = resolvePagination(filters.page, filters.limit);
         List<NativeSpaceLoggerBridge.QueryRow> rows = SpaceLogger.bridge().queryRows(
+            filters.dimension,
             filters.subject,
             filters.object,
             filters.verbMask,
@@ -144,12 +150,61 @@ public final class SpaceLoggerCommand {
         return pageRows.size();
     }
 
+    private static int executeStat(CommandSourceStack source) {
+        NativeSpaceLoggerBridge.DbStats stats = SpaceLogger.bridge().stats(5);
+        source.sendSystemMessage(Component.literal(
+            String.format(
+                Locale.ROOT,
+                "[space-logger] schema=%d rows=%d memtable=%d segments=%d wal=%s disk=%s",
+                stats.schemaVersion(),
+                stats.totalRows(),
+                stats.memtableRows(),
+                stats.segmentCount(),
+                formatBytes(stats.walSizeBytes()),
+                formatBytes(stats.diskUsageBytes())
+            )
+        ).withStyle(ChatFormatting.AQUA));
+
+        NativeSpaceLoggerBridge.SegmentStats[] latestSegments = stats.latestSegments();
+        if (latestSegments.length == 0) {
+            source.sendSystemMessage(Component.literal("[space-logger] no persisted segments").withStyle(ChatFormatting.DARK_GRAY));
+            return 1;
+        }
+
+        source.sendSystemMessage(Component.literal("[space-logger] latest segments:").withStyle(ChatFormatting.GRAY));
+        for (int i = 0; i < latestSegments.length; i++) {
+            NativeSpaceLoggerBridge.SegmentStats segment = latestSegments[i];
+            source.sendSystemMessage(Component.literal(
+                String.format(
+                    Locale.ROOT,
+                    "#%d %s rows=%d seq=%d..%d time=%d..%d size=%s xyz=[%d..%d,%d..%d,%d..%d]",
+                    i + 1,
+                    segment.fileName(),
+                    segment.rowCount(),
+                    segment.minSeq(),
+                    segment.maxSeq(),
+                    segment.minTimeMs(),
+                    segment.maxTimeMs(),
+                    formatBytes(segment.sizeBytes()),
+                    segment.minX(),
+                    segment.maxX(),
+                    segment.minY(),
+                    segment.maxY(),
+                    segment.minZ(),
+                    segment.maxZ()
+                )
+            ).withStyle(ChatFormatting.YELLOW));
+        }
+
+        return 1;
+    }
+
     private static MutableComponent formatQueryRowLine(int index, NativeSpaceLoggerBridge.QueryRow row, long nowMs) {
         String fullTimestamp = Instant.ofEpochMilli(row.timeMs())
             .atZone(ZoneId.systemDefault())
             .format(TIME_FORMATTER);
         String relative = formatRelativeTime(row.timeMs(), nowMs);
-        String coordText = "@ " + row.x() + "," + row.y() + "," + row.z();
+        String coordText = "@ " + row.dimension() + " " + row.x() + "," + row.y() + "," + row.z();
         String tpCommand = "/sl tp " + row.x() + " " + row.y() + " " + row.z();
 
         MutableComponent line = Component.empty();
@@ -255,6 +310,21 @@ public final class SpaceLoggerCommand {
         return "now";
     }
 
+    private static String formatBytes(long bytes) {
+        if (bytes < 1024L) {
+            return bytes + " B";
+        }
+        double kib = bytes / 1024.0D;
+        if (kib < 1024.0D) {
+            return String.format(Locale.ROOT, "%.1f KiB", kib);
+        }
+        double mib = kib / 1024.0D;
+        if (mib < 1024.0D) {
+            return String.format(Locale.ROOT, "%.1f MiB", mib);
+        }
+        return String.format(Locale.ROOT, "%.1f GiB", mib / 1024.0D);
+    }
+
     static ParsedFilters parseFilters(String rawFilterText, ServerPlayer player) throws CommandSyntaxException {
         String[] tokens = rawFilterText == null || rawFilterText.isBlank()
             ? new String[0]
@@ -262,6 +332,7 @@ public final class SpaceLoggerCommand {
 
         String subject = "";
         String object = "";
+        String dimension = "";
         int verbMask = NativeSpaceLoggerBridge.VERB_MASK_ALL;
         Integer range = null;
         Integer limit = null;
@@ -270,6 +341,7 @@ public final class SpaceLoggerCommand {
         Long beforeTimeMs = null;
         long nowMs = System.currentTimeMillis();
         List<String> pageBaseTokens = new ArrayList<>();
+        boolean explicitDimension = false;
 
         for (String token : tokens) {
             String[] kv = token.split(":", 2);
@@ -283,6 +355,10 @@ public final class SpaceLoggerCommand {
             switch (key) {
                 case "subject" -> subject = value;
                 case "object" -> object = value;
+                case "dimension" -> {
+                    dimension = value;
+                    explicitDimension = true;
+                }
                 case "verb" -> verbMask &= parseVerbMask(value);
                 case "range" -> {
                     int parsed = parsePositiveInt(value, "range");
@@ -333,6 +409,12 @@ public final class SpaceLoggerCommand {
         int maxY = Integer.MAX_VALUE;
         int minZ = Integer.MIN_VALUE;
         int maxZ = Integer.MAX_VALUE;
+        if (player != null && dimension.isBlank()) {
+            dimension = NativeSpaceLoggerBridge.dimension(player.level());
+            if (!explicitDimension) {
+                pageBaseTokens.add("dimension:" + dimension);
+            }
+        }
         if (range != null) {
             if (player == null) {
                 throw syntax("range filter requires a player context");
@@ -349,6 +431,7 @@ public final class SpaceLoggerCommand {
         return new ParsedFilters(
             subject,
             object,
+            dimension,
             verbMask,
             minX,
             maxX,
@@ -423,6 +506,7 @@ public final class SpaceLoggerCommand {
             case "subject" -> suggestSingleValueToken(key, value, subjectSuggestions(playerName));
             case "object" -> suggestSingleValueToken(key, value, List.of("minecraft:chest", "minecraft:stone", "minecraft:lever"));
             case "verb" -> suggestVerbToken(value);
+            case "dimension" -> suggestSingleValueToken(key, value, DIMENSION_SUGGESTIONS);
             case "range" -> suggestSingleValueToken(key, value, RANGE_SUGGESTIONS);
             case "limit" -> suggestSingleValueToken(key, value, LIMIT_SUGGESTIONS);
             case "page" -> suggestSingleValueToken(key, value, PAGE_SUGGESTIONS);
@@ -616,6 +700,7 @@ public final class SpaceLoggerCommand {
     static final class ParsedFilters {
         final String subject;
         final String object;
+        final String dimension;
         final int verbMask;
         final int minX;
         final int maxX;
@@ -632,6 +717,7 @@ public final class SpaceLoggerCommand {
         private ParsedFilters(
             String subject,
             String object,
+            String dimension,
             int verbMask,
             int minX,
             int maxX,
@@ -647,6 +733,7 @@ public final class SpaceLoggerCommand {
         ) {
             this.subject = subject;
             this.object = object;
+            this.dimension = dimension;
             this.verbMask = verbMask;
             this.minX = minX;
             this.maxX = maxX;

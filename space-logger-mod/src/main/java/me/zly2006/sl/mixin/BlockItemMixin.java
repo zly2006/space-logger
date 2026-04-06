@@ -34,6 +34,7 @@ public abstract class BlockItemMixin {
             pos.getX(),
             pos.getY(),
             pos.getZ(),
+            NativeSpaceLoggerBridge.dimension(serverPlayer.level()),
             NativeSpaceLoggerBridge.subject(serverPlayer),
             NativeSpaceLoggerBridge.VERB_PLACE,
             NativeSpaceLoggerBridge.normalizeIdentifier(BuiltInRegistries.BLOCK.getKey(self.getBlock())),

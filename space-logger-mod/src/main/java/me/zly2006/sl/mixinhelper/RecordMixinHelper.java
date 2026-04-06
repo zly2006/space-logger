@@ -21,6 +21,7 @@ public final class RecordMixinHelper {
             return;
         }
         OperationContext context = new OperationContext(
+            NativeSpaceLoggerBridge.dimension(player.level()),
             NativeSpaceLoggerBridge.subject(player),
             NativeSpaceLoggerBridge.subjectExtra(player),
             cause
@@ -91,6 +92,7 @@ public final class RecordMixinHelper {
             pos.getX(),
             pos.getY(),
             pos.getZ(),
+            context.dimension(),
             context.subject(),
             NativeSpaceLoggerBridge.VERB_BREAK,
             NativeSpaceLoggerBridge.blockId(previousState),
@@ -112,7 +114,7 @@ public final class RecordMixinHelper {
         OPERATION_STACK.get().push(new OperationStackEntry(context, reason));
     }
 
-    public record OperationContext(String subject, String subjectExtra, OperationCause cause) {
+    public record OperationContext(String dimension, String subject, String subjectExtra, OperationCause cause) {
     }
 
     private record OperationStackEntry(OperationContext context, String reason) {

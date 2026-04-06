@@ -36,6 +36,8 @@ import java.util.UUID;
 import java.nio.charset.StandardCharsets;
 
 public class SpaceLoggerGameTests {
+    private static final String TEST_DIMENSION = "overworld";
+
     private static int mask(int verbId) {
         return NativeSpaceLoggerBridge.verbMaskSingle(verbId);
     }
@@ -149,6 +151,7 @@ public class SpaceLoggerGameTests {
             );
             int noMatchCount = SpaceLogger.bridge().countByVerb(-1);
             int useAtPlacePos = SpaceLogger.bridge().queryRows(
+                TEST_DIMENSION,
                 "",
                 "",
                 mask(NativeSpaceLoggerBridge.VERB_USE),
@@ -163,6 +166,7 @@ public class SpaceLoggerGameTests {
                 32
             ).size();
             int useAtUsePos = SpaceLogger.bridge().queryRows(
+                TEST_DIMENSION,
                 "",
                 "",
                 mask(NativeSpaceLoggerBridge.VERB_USE),
@@ -255,6 +259,7 @@ public class SpaceLoggerGameTests {
 
         helper.runAfterDelay(2, () -> {
             var addRows = SpaceLogger.bridge().queryRows(
+                TEST_DIMENSION,
                 "",
                 "",
                 mask(NativeSpaceLoggerBridge.VERB_ADD_ITEM),
@@ -269,6 +274,7 @@ public class SpaceLoggerGameTests {
                 32
             );
             var removeRows = SpaceLogger.bridge().queryRows(
+                TEST_DIMENSION,
                 "",
                 "",
                 mask(NativeSpaceLoggerBridge.VERB_REMOVE_ITEM),
@@ -654,6 +660,7 @@ public class SpaceLoggerGameTests {
 
         helper.runAfterDelay(2, () -> {
             var rows = SpaceLogger.bridge().queryRows(
+                TEST_DIMENSION,
                 subject,
                 "time",
                 mask(NativeSpaceLoggerBridge.VERB_COMMAND),
@@ -675,6 +682,36 @@ public class SpaceLoggerGameTests {
                 java.util.Arrays.equals(row.dataHead(), fullCommand.getBytes(StandardCharsets.UTF_8)),
                 "expected command data to equal command text without leading slash"
             );
+            helper.succeed();
+        });
+    }
+
+    @GameTest
+    public void reportsStatsSummary(GameTestHelper helper) {
+        ServerPlayer player = makeMockServerPlayerInLevel(helper);
+        player.setGameMode(GameType.SURVIVAL);
+        BlockPos pos = helper.absolutePos(new BlockPos(8, 1, 8));
+
+        SpaceLogger.bridge().appendNow(
+            pos.getX(),
+            pos.getY(),
+            pos.getZ(),
+            TEST_DIMENSION,
+            NativeSpaceLoggerBridge.subject(player),
+            NativeSpaceLoggerBridge.VERB_COMMAND,
+            "time",
+            NativeSpaceLoggerBridge.subjectExtra(player),
+            NativeSpaceLoggerBridge.encodeCommandData("time set day")
+        );
+        SpaceLogger.bridge().flush();
+
+        helper.runAfterDelay(2, () -> {
+            NativeSpaceLoggerBridge.DbStats stats = SpaceLogger.bridge().stats(5);
+            helper.assertTrue(stats.schemaVersion() >= 2, "expected dimension-aware schema version");
+            helper.assertTrue(stats.totalRows() >= 1, "expected stats to report at least one row");
+            helper.assertTrue(stats.segmentCount() >= 1, "expected at least one persisted segment");
+            helper.assertTrue(stats.latestSegments().length >= 1, "expected latest segment stats");
+            helper.assertTrue(stats.diskUsageBytes() > 0L, "expected disk usage to be positive");
             helper.succeed();
         });
     }
@@ -742,6 +779,7 @@ public class SpaceLoggerGameTests {
             absPos.getX(),
             absPos.getY(),
             absPos.getZ(),
+            TEST_DIMENSION,
             subject,
             NativeSpaceLoggerBridge.VERB_REMOVE_ITEM,
             object,
@@ -752,6 +790,7 @@ public class SpaceLoggerGameTests {
             absPos.getX(),
             absPos.getY(),
             absPos.getZ(),
+            TEST_DIMENSION,
             subject,
             NativeSpaceLoggerBridge.VERB_ADD_ITEM,
             object,
@@ -762,6 +801,7 @@ public class SpaceLoggerGameTests {
 
         helper.runAfterDelay(2, () -> {
             int removeCount = SpaceLogger.bridge().queryRows(
+                TEST_DIMENSION,
                 subject,
                 object,
                 mask(NativeSpaceLoggerBridge.VERB_REMOVE_ITEM),
@@ -776,6 +816,7 @@ public class SpaceLoggerGameTests {
                 32
             ).size();
             int addCount = SpaceLogger.bridge().queryRows(
+                TEST_DIMENSION,
                 subject,
                 object,
                 mask(NativeSpaceLoggerBridge.VERB_ADD_ITEM),
@@ -812,6 +853,7 @@ public class SpaceLoggerGameTests {
             absPos.getX(),
             absPos.getY(),
             absPos.getZ(),
+            TEST_DIMENSION,
             subject,
             NativeSpaceLoggerBridge.VERB_REMOVE_ITEM,
             object,
@@ -822,6 +864,7 @@ public class SpaceLoggerGameTests {
             absPos.getX(),
             absPos.getY(),
             absPos.getZ(),
+            TEST_DIMENSION,
             subject,
             NativeSpaceLoggerBridge.VERB_USE,
             "stone",
@@ -832,6 +875,7 @@ public class SpaceLoggerGameTests {
             absPos.getX(),
             absPos.getY(),
             absPos.getZ(),
+            TEST_DIMENSION,
             subject,
             NativeSpaceLoggerBridge.VERB_ADD_ITEM,
             object,
@@ -842,6 +886,7 @@ public class SpaceLoggerGameTests {
 
         helper.runAfterDelay(2, () -> {
             int removeCount = SpaceLogger.bridge().queryRows(
+                TEST_DIMENSION,
                 subject,
                 object,
                 mask(NativeSpaceLoggerBridge.VERB_REMOVE_ITEM),
@@ -856,6 +901,7 @@ public class SpaceLoggerGameTests {
                 32
             ).size();
             int addCount = SpaceLogger.bridge().queryRows(
+                TEST_DIMENSION,
                 subject,
                 object,
                 mask(NativeSpaceLoggerBridge.VERB_ADD_ITEM),
@@ -892,6 +938,7 @@ public class SpaceLoggerGameTests {
 
     private static int countRowsAt(String subject, String object, int verbId, BlockPos pos, long startTimeMs) {
         return SpaceLogger.bridge().queryRows(
+            TEST_DIMENSION,
             subject,
             object,
             mask(verbId),

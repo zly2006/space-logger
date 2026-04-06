@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +16,8 @@ const SEGMENT_V2_MAGIC: [u8; 8] = *b"SLSEGv2\0";
 const SEGMENT_V2_HEADER_LEN: u64 = 36;
 const INVENTORY_DATA_MAGIC: [u8; 4] = *b"SLI1";
 const INVENTORY_DATA_HEADER_LEN: usize = 12;
+const DB_SCHEMA_VERSION: u32 = 2;
+const DB_SCHEMA_FILE: &str = "schema_version";
 pub const VERB_HURT: u32 = 0;
 pub const VERB_KILL: u32 = 1;
 pub const VERB_BREAK: u32 = 2;
@@ -30,6 +33,7 @@ pub struct Row {
     pub x: i32,
     pub y: i32,
     pub z: i32,
+    pub dimension: String,
     pub subject: String,
     pub object: String,
     pub verb: u32,
@@ -139,10 +143,40 @@ pub struct Query {
     pub x: Option<IntPredicate>,
     pub y: Option<IntPredicate>,
     pub z: Option<IntPredicate>,
+    pub dimension: Option<String>,
     pub subject: Option<String>,
     pub object: Option<String>,
     pub verb_mask: u32,
     pub time_ms: Option<LongPredicate>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SegmentStats {
+    pub id: u64,
+    pub file_name: String,
+    pub row_count: usize,
+    pub min_seq: u64,
+    pub max_seq: u64,
+    pub min_time_ms: i64,
+    pub max_time_ms: i64,
+    pub min_x: i32,
+    pub max_x: i32,
+    pub min_y: i32,
+    pub max_y: i32,
+    pub min_z: i32,
+    pub max_z: i32,
+    pub size_bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DbStats {
+    pub schema_version: u32,
+    pub total_rows: usize,
+    pub memtable_rows: usize,
+    pub segment_count: usize,
+    pub wal_size_bytes: u64,
+    pub disk_usage_bytes: u64,
+    pub latest_segments: Vec<SegmentStats>,
 }
 
 impl Default for Query {
@@ -151,6 +185,7 @@ impl Default for Query {
             x: None,
             y: None,
             z: None,
+            dimension: None,
             subject: None,
             object: None,
             verb_mask: VERB_MASK_ALL,
@@ -257,12 +292,94 @@ impl From<bincode::Error> for DbError {
     }
 }
 
+fn schema_marker_path(db_dir: &Path) -> PathBuf {
+    db_dir.join(DB_SCHEMA_FILE)
+}
+
+fn write_schema_marker(db_dir: &Path) -> Result<(), DbError> {
+    fs::write(schema_marker_path(db_dir), format!("{DB_SCHEMA_VERSION}\n"))?;
+    Ok(())
+}
+
+fn existing_db_payload_paths(db_dir: &Path) -> Result<Vec<PathBuf>, DbError> {
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(db_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.file_name().and_then(|name| name.to_str()) == Some(DB_SCHEMA_FILE) {
+            continue;
+        }
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+fn schema_backup_path(db_dir: &Path) -> PathBuf {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let file_name = db_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("space-logger-db");
+    db_dir.with_file_name(format!("{file_name}.pre-dimension-schema-{suffix}"))
+}
+
+fn backup_incompatible_db(db_dir: &Path) -> Result<PathBuf, DbError> {
+    let backup_path = schema_backup_path(db_dir);
+    fs::rename(db_dir, &backup_path)?;
+    eprintln!(
+        "space-logger: incompatible on-disk schema detected, moved existing db to {}",
+        backup_path.display()
+    );
+    Ok(backup_path)
+}
+
+fn ensure_current_schema(db_dir: &Path) -> Result<(), DbError> {
+    let marker_path = schema_marker_path(db_dir);
+    match fs::read_to_string(&marker_path) {
+        Ok(contents) => {
+            let version = contents
+                .trim()
+                .parse::<u32>()
+                .map_err(|_| DbError::CorruptedSegment(format!(
+                    "invalid schema marker contents in {}",
+                    marker_path.display()
+                )))?;
+            if version == DB_SCHEMA_VERSION {
+                return Ok(());
+            }
+            if version > DB_SCHEMA_VERSION {
+                return Err(DbError::CorruptedSegment(format!(
+                    "db schema version {version} is newer than supported {DB_SCHEMA_VERSION}"
+                )));
+            }
+            backup_incompatible_db(db_dir)?;
+            fs::create_dir_all(db_dir)?;
+            write_schema_marker(db_dir)?;
+            Ok(())
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            let payloads = existing_db_payload_paths(db_dir)?;
+            if !payloads.is_empty() {
+                backup_incompatible_db(db_dir)?;
+                fs::create_dir_all(db_dir)?;
+            }
+            write_schema_marker(db_dir)?;
+            Ok(())
+        }
+        Err(err) => Err(DbError::Io(err)),
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 struct ColumnStore {
     seq: Vec<u64>,
     x: Vec<i32>,
     y: Vec<i32>,
     z: Vec<i32>,
+    dimension: Vec<String>,
     subject: Vec<String>,
     object: Vec<String>,
     verb: Vec<u32>,
@@ -285,6 +402,7 @@ impl ColumnStore {
         self.x.push(row.x);
         self.y.push(row.y);
         self.z.push(row.z);
+        self.dimension.push(row.dimension.clone());
         self.subject.push(row.subject.clone());
         self.object.push(row.object.clone());
         self.verb.push(row.verb);
@@ -298,6 +416,7 @@ impl ColumnStore {
             x: self.x[row_id],
             y: self.y[row_id],
             z: self.z[row_id],
+            dimension: self.dimension[row_id].clone(),
             subject: self.subject[row_id].clone(),
             object: self.object[row_id].clone(),
             verb: self.verb[row_id],
@@ -311,6 +430,7 @@ impl ColumnStore {
 #[derive(Clone, Debug, Default)]
 struct MemTable {
     columns: ColumnStore,
+    dimension_index: HashMap<String, Vec<usize>>,
     subject_index: HashMap<String, Vec<usize>>,
     object_index: HashMap<String, Vec<usize>>,
     verb_index: [Vec<usize>; 32],
@@ -319,6 +439,10 @@ struct MemTable {
 impl MemTable {
     fn insert(&mut self, seq: u64, row: &Row) {
         let row_id = self.columns.len();
+        self.dimension_index
+            .entry(row.dimension.clone())
+            .or_default()
+            .push(row_id);
         self.subject_index
             .entry(row.subject.clone())
             .or_default()
@@ -358,6 +482,7 @@ impl MemTable {
         let mut candidate = initial_candidates_from_indexed_filters(
             self.columns.len(),
             query,
+            &self.dimension_index,
             &self.subject_index,
             &self.object_index,
             &self.verb_index,
@@ -526,6 +651,25 @@ impl SegmentMeta {
         long_bounds(query.time_ms.as_ref())
             .is_none_or(|(min, max)| max >= self.min_time_ms && min <= self.max_time_ms)
     }
+
+    fn to_segment_stats(&self, id: u64, file_name: String, size_bytes: u64) -> SegmentStats {
+        SegmentStats {
+            id,
+            file_name,
+            row_count: self.row_count,
+            min_seq: self.min_seq,
+            max_seq: self.max_seq,
+            min_time_ms: self.min_time_ms,
+            max_time_ms: self.max_time_ms,
+            min_x: self.min_x,
+            max_x: self.max_x,
+            min_y: self.min_y,
+            max_y: self.max_y,
+            min_z: self.min_z,
+            max_z: self.max_z,
+            size_bytes,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -646,7 +790,8 @@ impl Segment {
 
         let columns = self.ensure_columns()?;
         let mut candidate: Option<Vec<usize>> = None;
-        let needs_index = query.subject.is_some()
+        let needs_index = query.dimension.is_some()
+            || query.subject.is_some()
             || query.object.is_some()
             || query.verb_mask != VERB_MASK_ALL
             || has_xyz_filter(query)
@@ -660,6 +805,7 @@ impl Segment {
             candidate = initial_candidates_from_indexed_filters(
                 columns.len(),
                 query,
+                &index.dimension_index,
                 &index.subject_index,
                 &index.object_index,
                 &index.verb_index,
@@ -800,6 +946,7 @@ impl Segment {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct SegmentIndex {
+    dimension_index: HashMap<String, Vec<usize>>,
     subject_index: HashMap<String, Vec<usize>>,
     object_index: HashMap<String, Vec<usize>>,
     verb_index: [Vec<usize>; 32],
@@ -809,6 +956,7 @@ struct SegmentIndex {
 
 impl SegmentIndex {
     fn build(columns: &ColumnStore) -> Self {
+        let mut dimension_index: HashMap<String, Vec<usize>> = HashMap::new();
         let mut subject_index: HashMap<String, Vec<usize>> = HashMap::new();
         let mut object_index: HashMap<String, Vec<usize>> = HashMap::new();
         let mut verb_index: [Vec<usize>; 32] = std::array::from_fn(|_| Vec::new());
@@ -816,6 +964,10 @@ impl SegmentIndex {
         let mut time_sorted = Vec::with_capacity(columns.len());
 
         for row_id in 0..columns.len() {
+            dimension_index
+                .entry(columns.dimension[row_id].clone())
+                .or_default()
+                .push(row_id);
             subject_index
                 .entry(columns.subject[row_id].clone())
                 .or_default()
@@ -828,7 +980,12 @@ impl SegmentIndex {
             if verb < 32 {
                 verb_index[verb as usize].push(row_id);
             }
-            let morton = morton_encode_i32(columns.x[row_id], columns.y[row_id], columns.z[row_id]);
+            let morton = morton_encode_i32_with_dimension(
+                dimension_code(&columns.dimension[row_id]),
+                columns.x[row_id],
+                columns.y[row_id],
+                columns.z[row_id],
+            );
             morton_sorted.push((morton, row_id));
             time_sorted.push((columns.time_ms[row_id], row_id));
         }
@@ -837,6 +994,7 @@ impl SegmentIndex {
         time_sorted.sort_unstable_by_key(|(time, _)| *time);
 
         Self {
+            dimension_index,
             subject_index,
             object_index,
             verb_index,
@@ -859,28 +1017,52 @@ impl SegmentIndex {
             None => return vec![],
         };
 
-        let lower_code = morton_encode_i32(x_bounds.0, y_bounds.0, z_bounds.0);
-        let upper_code = morton_encode_i32(x_bounds.1, y_bounds.1, z_bounds.1);
+        let dimension_codes = match query.dimension.as_ref() {
+            Some(dimension) => vec![dimension_code(dimension)],
+            None => vec![0u8, 1u8, 2u8, 3u8],
+        };
 
-        let start = self
-            .morton_sorted
-            .partition_point(|(code, _)| *code < lower_code);
-        let end = self
-            .morton_sorted
-            .partition_point(|(code, _)| *code <= upper_code);
+        let mut candidates = Vec::new();
+        for dimension_code in dimension_codes {
+            let lower_code = morton_encode_i32_with_dimension(
+                dimension_code,
+                x_bounds.0,
+                y_bounds.0,
+                z_bounds.0,
+            );
+            let upper_code = morton_encode_i32_with_dimension(
+                dimension_code,
+                x_bounds.1,
+                y_bounds.1,
+                z_bounds.1,
+            );
 
-        let mut candidates = self.morton_sorted[start..end]
-            .iter()
-            .map(|(_, row_id)| *row_id)
-            .filter(|row_id| {
-                let row_id = *row_id;
-                matches_int(columns.x[row_id], query.x.as_ref())
-                    && matches_int(columns.y[row_id], query.y.as_ref())
-                    && matches_int(columns.z[row_id], query.z.as_ref())
-            })
-            .collect::<Vec<_>>();
+            let start = self
+                .morton_sorted
+                .partition_point(|(code, _)| *code < lower_code);
+            let end = self
+                .morton_sorted
+                .partition_point(|(code, _)| *code <= upper_code);
+
+            candidates.extend(
+                self.morton_sorted[start..end]
+                    .iter()
+                    .map(|(_, row_id)| *row_id)
+                    .filter(|row_id| {
+                        let row_id = *row_id;
+                        matches_int(columns.x[row_id], query.x.as_ref())
+                            && matches_int(columns.y[row_id], query.y.as_ref())
+                            && matches_int(columns.z[row_id], query.z.as_ref())
+                            && query
+                                .dimension
+                                .as_ref()
+                                .is_none_or(|dimension| columns.dimension[row_id] == *dimension)
+                    }),
+            );
+        }
 
         candidates.sort_unstable();
+        candidates.dedup();
         candidates
     }
 
@@ -1019,6 +1201,7 @@ impl SpaceLoggerDb {
     pub fn open(db_dir: impl AsRef<Path>, options: DbOptions) -> Result<Self, DbError> {
         let db_dir = db_dir.as_ref().to_path_buf();
         fs::create_dir_all(&db_dir)?;
+        ensure_current_schema(&db_dir)?;
 
         let segments_dir = db_dir.join("segments");
         fs::create_dir_all(&segments_dir)?;
@@ -1235,6 +1418,45 @@ impl SpaceLoggerDb {
     pub fn wal_path(&self) -> Result<PathBuf, DbError> {
         let state = self.state.read().map_err(|_| DbError::PoisonedLock)?;
         Ok(state.wal.path().to_path_buf())
+    }
+
+    pub fn stats(&self, latest_segment_limit: usize) -> Result<DbStats, DbError> {
+        let state = self.state.read().map_err(|_| DbError::PoisonedLock)?;
+        let wal_size_bytes = fs::metadata(state.wal.path())
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        let total_rows = state.memtable.len()
+            + state
+                .segments
+                .iter()
+                .map(|segment| segment.meta.row_count)
+                .sum::<usize>();
+        let latest_segments = state
+            .segments
+            .iter()
+            .rev()
+            .take(latest_segment_limit)
+            .map(|segment| {
+                let file_name = segment
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let size_bytes = segment_family_size(&segment.path)?;
+                Ok(segment.meta.to_segment_stats(segment.id, file_name, size_bytes))
+            })
+            .collect::<Result<Vec<_>, DbError>>()?;
+
+        Ok(DbStats {
+            schema_version: DB_SCHEMA_VERSION,
+            total_rows,
+            memtable_rows: state.memtable.len(),
+            segment_count: state.segments.len(),
+            wal_size_bytes,
+            disk_usage_bytes: directory_size_bytes(&self.db_dir)?,
+            latest_segments,
+        })
     }
 
     fn flush_locked(&self, state: &mut DbState) -> Result<(), DbError> {
@@ -1492,13 +1714,14 @@ fn enforce_same_location_kill_limit(columns: ColumnStore, limit: usize) -> Colum
     }
 
     let mut keep = vec![true; columns.len()];
-    let mut per_location_object = HashMap::<(i32, i32, i32, String), usize>::new();
+    let mut per_location_object = HashMap::<(String, i32, i32, i32, String), usize>::new();
 
     for row_id in (0..columns.len()).rev() {
         if columns.verb[row_id] != VERB_KILL {
             continue;
         }
         let key = (
+            columns.dimension[row_id].clone(),
             columns.x[row_id],
             columns.y[row_id],
             columns.z[row_id],
@@ -1523,6 +1746,7 @@ fn enforce_same_location_kill_limit(columns: ColumnStore, limit: usize) -> Colum
             filtered.x.push(columns.x[row_id]);
             filtered.y.push(columns.y[row_id]);
             filtered.z.push(columns.z[row_id]);
+            filtered.dimension.push(columns.dimension[row_id].clone());
             filtered.subject.push(columns.subject[row_id].clone());
             filtered.object.push(columns.object[row_id].clone());
             filtered.verb.push(columns.verb[row_id]);
@@ -1565,6 +1789,7 @@ fn consolidate_inventory_remove_add_on_flush(mut columns: ColumnStore) -> Column
         }
 
         let run_pos = (
+            columns.dimension[run_start].clone(),
             columns.x[run_start],
             columns.y[run_start],
             columns.z[run_start],
@@ -1575,7 +1800,12 @@ fn consolidate_inventory_remove_add_on_flush(mut columns: ColumnStore) -> Column
                 break;
             }
 
-            let pos = (columns.x[run_end], columns.y[run_end], columns.z[run_end]);
+            let pos = (
+                columns.dimension[run_end].clone(),
+                columns.x[run_end],
+                columns.y[run_end],
+                columns.z[run_end],
+            );
             if pos != run_pos {
                 break;
             }
@@ -1597,6 +1827,7 @@ fn consolidate_inventory_remove_add_on_flush(mut columns: ColumnStore) -> Column
             filtered.x.push(columns.x[row_id]);
             filtered.y.push(columns.y[row_id]);
             filtered.z.push(columns.z[row_id]);
+            filtered.dimension.push(columns.dimension[row_id].clone());
             filtered.subject.push(columns.subject[row_id].clone());
             filtered.object.push(columns.object[row_id].clone());
             filtered.verb.push(columns.verb[row_id]);
@@ -1943,14 +2174,58 @@ fn remove_segment_family(segment_path: &Path) -> Result<(), DbError> {
     Ok(())
 }
 
+fn segment_family_size(segment_path: &Path) -> Result<u64, DbError> {
+    let mut total = 0u64;
+    for path in [
+        segment_path.to_path_buf(),
+        preferred_segment_meta_path(segment_path),
+        preferred_segment_index_path(segment_path),
+        legacy_segment_meta_path(segment_path),
+        legacy_segment_index_path(segment_path),
+    ] {
+        if let Ok(meta) = fs::metadata(path) {
+            total = total.saturating_add(meta.len());
+        }
+    }
+    Ok(total)
+}
+
+fn directory_size_bytes(path: &Path) -> Result<u64, DbError> {
+    if !path.exists() {
+        return Ok(0);
+    }
+
+    let mut total = 0u64;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let child = entry.path();
+        let meta = entry.metadata()?;
+        if meta.is_dir() {
+            total = total.saturating_add(directory_size_bytes(&child)?);
+        } else if meta.is_file() {
+            total = total.saturating_add(meta.len());
+        }
+    }
+    Ok(total)
+}
+
 fn initial_candidates_from_indexed_filters(
     row_count: usize,
     query: &Query,
+    dimension_index: &HashMap<String, Vec<usize>>,
     subject_index: &HashMap<String, Vec<usize>>,
     object_index: &HashMap<String, Vec<usize>>,
     verb_index: &[Vec<usize>; 32],
 ) -> Option<Vec<usize>> {
     let mut candidate: Option<Vec<usize>> = None;
+
+    if let Some(dimension) = query.dimension.as_ref() {
+        let ids = dimension_index.get(dimension).cloned().unwrap_or_default();
+        candidate = Some(intersect_sorted_vecs(
+            candidate.unwrap_or_else(|| (0..row_count).collect()),
+            ids,
+        ));
+    }
 
     if let Some(subject) = query.subject.as_ref() {
         let ids = subject_index.get(subject).cloned().unwrap_or_default();
@@ -2013,6 +2288,10 @@ fn row_id_matches_query(columns: &ColumnStore, row_id: usize, query: &Query) -> 
     matches_int(columns.x[row_id], query.x.as_ref())
         && matches_int(columns.y[row_id], query.y.as_ref())
         && matches_int(columns.z[row_id], query.z.as_ref())
+        && query
+            .dimension
+            .as_ref()
+            .is_none_or(|dimension| columns.dimension[row_id] == *dimension)
         && matches_long(columns.time_ms[row_id], query.time_ms.as_ref())
         && query
             .subject
@@ -2029,6 +2308,10 @@ fn row_matches_query(row: &Row, query: &Query) -> bool {
     matches_int(row.x, query.x.as_ref())
         && matches_int(row.y, query.y.as_ref())
         && matches_int(row.z, query.z.as_ref())
+        && query
+            .dimension
+            .as_ref()
+            .is_none_or(|dimension| row.dimension == *dimension)
         && matches_long(row.time_ms, query.time_ms.as_ref())
         && query
             .subject
@@ -2154,8 +2437,18 @@ fn intersect_sorted_vecs(mut left: Vec<usize>, mut right: Vec<usize>) -> Vec<usi
     output
 }
 
-fn morton_encode_i32(x: i32, y: i32, z: i32) -> u128 {
-    morton_encode_u32(
+fn dimension_code(dimension: &str) -> u8 {
+    match dimension {
+        "overworld" => 0,
+        "the_nether" => 1,
+        "the_end" => 2,
+        _ => 3,
+    }
+}
+
+fn morton_encode_i32_with_dimension(dimension: u8, x: i32, y: i32, z: i32) -> u128 {
+    morton_encode_u32_with_dimension(
+        dimension,
         signed_to_ordered_u32(x),
         signed_to_ordered_u32(y),
         signed_to_ordered_u32(z),
@@ -2166,12 +2459,12 @@ fn signed_to_ordered_u32(value: i32) -> u32 {
     (value as u32) ^ 0x8000_0000
 }
 
-fn morton_encode_u32(x: u32, y: u32, z: u32) -> u128 {
+fn morton_encode_u32_with_dimension(dimension: u8, x: u32, y: u32, z: u32) -> u128 {
     let mut code = 0u128;
     for bit in 0..32usize {
         code |= ((x as u128 >> bit) & 1) << (3 * bit);
         code |= ((y as u128 >> bit) & 1) << (3 * bit + 1);
         code |= ((z as u128 >> bit) & 1) << (3 * bit + 2);
     }
-    code
+    code | (((dimension & 0b11) as u128) << 126)
 }
