@@ -66,4 +66,12 @@ class SpaceLoggerCommandTest {
             SpaceLoggerCommand.completeFilterToken("subject:A", "Alice")
         );
     }
+
+    @Test
+    void teleportCommandIncludesDimension() {
+        assertEquals(
+            "/sl tp the_nether 1 64 -3",
+            SpaceLoggerCommand.teleportCommand("the_nether", 1, 64, -3)
+        );
+    }
 }

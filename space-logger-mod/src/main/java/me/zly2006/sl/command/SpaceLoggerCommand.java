@@ -26,12 +26,16 @@ import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.network.chat.ClickEvent;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.HoverEvent;
 import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.Level;
 
 public final class SpaceLoggerCommand {
     private static final int DEFAULT_LIMIT = 5;
@@ -61,6 +65,25 @@ public final class SpaceLoggerCommand {
                     .then(
                         Commands.literal("tp")
                             .then(
+                                Commands.argument("dimension", StringArgumentType.word())
+                                    .then(
+                                        Commands.argument("x", IntegerArgumentType.integer())
+                                            .then(
+                                                Commands.argument("y", IntegerArgumentType.integer())
+                                                    .then(
+                                                        Commands.argument("z", IntegerArgumentType.integer())
+                                                            .executes(ctx -> executeTeleport(
+                                                                ctx.getSource(),
+                                                                StringArgumentType.getString(ctx, "dimension"),
+                                                                IntegerArgumentType.getInteger(ctx, "x"),
+                                                                IntegerArgumentType.getInteger(ctx, "y"),
+                                                                IntegerArgumentType.getInteger(ctx, "z")
+                                                            ))
+                                                    )
+                                            )
+                                    )
+                            )
+                            .then(
                                 Commands.argument("x", IntegerArgumentType.integer())
                                     .then(
                                         Commands.argument("y", IntegerArgumentType.integer())
@@ -68,6 +91,7 @@ public final class SpaceLoggerCommand {
                                                 Commands.argument("z", IntegerArgumentType.integer())
                                                     .executes(ctx -> executeTeleport(
                                                         ctx.getSource(),
+                                                        NativeSpaceLoggerBridge.dimension(ctx.getSource().getLevel()),
                                                         IntegerArgumentType.getInteger(ctx, "x"),
                                                         IntegerArgumentType.getInteger(ctx, "y"),
                                                         IntegerArgumentType.getInteger(ctx, "z")
@@ -93,13 +117,14 @@ public final class SpaceLoggerCommand {
         );
     }
 
-    private static int executeTeleport(CommandSourceStack source, int x, int y, int z) throws CommandSyntaxException {
+    private static int executeTeleport(CommandSourceStack source, String dimensionName, int x, int y, int z) throws CommandSyntaxException {
         ServerPlayer player = source.getPlayer();
         if (player == null) {
             throw PLAYER_ONLY.create();
         }
 
-        player.teleportTo(x + 0.5D, y, z + 0.5D);
+        ServerLevel targetLevel = resolveLevel(source, dimensionName);
+        player.teleportTo(targetLevel, x + 0.5D, y, z + 0.5D, Set.of(), player.getYRot(), player.getXRot(), false);
         return 1;
     }
 
@@ -210,7 +235,7 @@ public final class SpaceLoggerCommand {
             case "the_end" -> "E";
             default -> row.dimension();
         } + " " + row.x() + "," + row.y() + "," + row.z();
-        String tpCommand = "/sl tp " + row.x() + " " + row.y() + " " + row.z();
+        String tpCommand = teleportCommand(row.dimension(), row.x(), row.y(), row.z());
 
         MutableComponent line = Component.empty();
         line.append(Component.literal("#" + index).withStyle(ChatFormatting.GRAY));
@@ -328,6 +353,31 @@ public final class SpaceLoggerCommand {
             return String.format(Locale.ROOT, "%.1f MiB", mib);
         }
         return String.format(Locale.ROOT, "%.1f GiB", mib / 1024.0D);
+    }
+
+    static String teleportCommand(String dimension, int x, int y, int z) {
+        return "/sl tp " + dimension + " " + x + " " + y + " " + z;
+    }
+
+    private static ServerLevel resolveLevel(CommandSourceStack source, String dimensionName) throws CommandSyntaxException {
+        Identifier dimensionId = parseDimensionIdentifier(dimensionName);
+        ResourceKey<Level> key = ResourceKey.create(Registries.DIMENSION, dimensionId);
+        ServerLevel level = source.getServer().getLevel(key);
+        if (level == null) {
+            throw syntax("unknown dimension: `" + dimensionName + "`");
+        }
+        return level;
+    }
+
+    private static Identifier parseDimensionIdentifier(String dimensionName) throws CommandSyntaxException {
+        if (dimensionName == null || dimensionName.isBlank()) {
+            throw syntax("dimension must not be empty");
+        }
+        Identifier parsed = Identifier.tryParse(dimensionName);
+        if (parsed == null) {
+            throw syntax("invalid dimension identifier: `" + dimensionName + "`");
+        }
+        return parsed;
     }
 
     static ParsedFilters parseFilters(String rawFilterText, ServerPlayer player) throws CommandSyntaxException {
