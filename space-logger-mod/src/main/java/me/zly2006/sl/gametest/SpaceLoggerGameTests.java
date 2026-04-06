@@ -456,7 +456,7 @@ public class SpaceLoggerGameTests {
     @GameTest(maxTicks = 160)
     public void recordsTntKillForIgnitingPlayer(GameTestHelper helper) {
         long startTimeMs = System.currentTimeMillis();
-        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        ServerPlayer player = makeMockServerPlayerInLevel(helper);
         player.setGameMode(GameType.SURVIVAL);
 
         BlockPos tntPos = new BlockPos(1, 2, 1);
@@ -511,7 +511,7 @@ public class SpaceLoggerGameTests {
     @GameTest
     public void recordsEndCrystalExplosionBreakAndKillForAttackingPlayer(GameTestHelper helper) {
         long startTimeMs = System.currentTimeMillis();
-        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        ServerPlayer player = makeMockServerPlayerInLevel(helper);
         player.setGameMode(GameType.SURVIVAL);
 
         BlockPos crystalBasePos = new BlockPos(1, 1, 1);
@@ -628,7 +628,7 @@ public class SpaceLoggerGameTests {
     @GameTest(maxTicks = 160)
     public void recordsSummonTntKillForCommandPlayer(GameTestHelper helper) {
         long startTimeMs = System.currentTimeMillis();
-        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        ServerPlayer player = makeMockServerPlayerInLevel(helper);
         player.setGameMode(GameType.SURVIVAL);
 
         BlockPos tntPos = new BlockPos(1, 2, 1);
