@@ -453,6 +453,124 @@ public class SpaceLoggerGameTests {
         });
     }
 
+    @GameTest(maxTicks = 160)
+    public void recordsTntKillForIgnitingPlayer(GameTestHelper helper) {
+        long startTimeMs = System.currentTimeMillis();
+        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        player.setGameMode(GameType.SURVIVAL);
+
+        BlockPos tntPos = new BlockPos(1, 2, 1);
+        BlockPos pigPos = new BlockPos(2, 2, 1);
+        BlockPos absTntPos = helper.absolutePos(tntPos);
+        BlockPos absPigPos = helper.absolutePos(pigPos);
+        String subject = NativeSpaceLoggerBridge.subject(player);
+
+        for (int x = 1; x <= 3; x++) {
+            helper.setBlock(new BlockPos(x, 1, 1), Blocks.OBSIDIAN);
+        }
+        helper.setBlock(tntPos, Blocks.TNT);
+        var pig = helper.spawn(EntityType.PIG, pigPos);
+        pig.setNoAi(true);
+        String pigObject = NativeSpaceLoggerBridge.entityId(pig);
+
+        player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.FLINT_AND_STEEL));
+        player.setPos(absTntPos.getX() + 0.5D, absTntPos.getY() + 1.0D, absTntPos.getZ() + 0.5D);
+        BlockHitResult igniteHit = new BlockHitResult(
+            Vec3.atCenterOf(absTntPos),
+            Direction.UP,
+            absTntPos,
+            false
+        );
+        InteractionResult igniteResult = player.gameMode.useItemOn(
+            player,
+            helper.getLevel(),
+            player.getItemInHand(InteractionHand.MAIN_HAND),
+            InteractionHand.MAIN_HAND,
+            igniteHit
+        );
+        helper.assertTrue(igniteResult.consumesAction(), "expected TNT ignition to consume action");
+
+        player.setPos(absPigPos.getX() + 8.0D, absPigPos.getY() + 2.0D, absPigPos.getZ() + 8.0D);
+
+        helper.succeedWhen(() -> {
+            helper.assertTrue(!pig.isAlive(), "expected TNT explosion to kill the pig");
+            int killCount = countRowsAt(
+                subject,
+                pigObject,
+                NativeSpaceLoggerBridge.VERB_KILL,
+                absPigPos,
+                startTimeMs
+            );
+            helper.assertTrue(
+                killCount == 1,
+                "expected exactly one pig kill row for igniting player, actual=" + killCount
+            );
+        });
+    }
+
+    @GameTest
+    public void recordsEndCrystalExplosionBreakAndKillForAttackingPlayer(GameTestHelper helper) {
+        long startTimeMs = System.currentTimeMillis();
+        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        player.setGameMode(GameType.SURVIVAL);
+
+        BlockPos crystalBasePos = new BlockPos(1, 1, 1);
+        BlockPos crystalPos = new BlockPos(1, 2, 1);
+        BlockPos pigPos = new BlockPos(2, 2, 1);
+        BlockPos stonePos = new BlockPos(4, 2, 1);
+        BlockPos absPigPos = helper.absolutePos(pigPos);
+        BlockPos absStonePos = helper.absolutePos(stonePos);
+        String subject = NativeSpaceLoggerBridge.subject(player);
+        String stoneObject = NativeSpaceLoggerBridge.blockId(Blocks.STONE.defaultBlockState());
+
+        helper.setBlock(crystalBasePos, Blocks.OBSIDIAN);
+        helper.setBlock(new BlockPos(2, 1, 1), Blocks.OBSIDIAN);
+        helper.setBlock(new BlockPos(3, 1, 1), Blocks.OBSIDIAN);
+        helper.setBlock(new BlockPos(4, 1, 1), Blocks.OBSIDIAN);
+        helper.setBlock(stonePos, Blocks.STONE);
+
+        var pig = helper.spawn(EntityType.PIG, pigPos);
+        pig.setNoAi(true);
+        String pigObject = NativeSpaceLoggerBridge.entityId(pig);
+
+        var crystal = helper.spawn(EntityType.END_CRYSTAL, crystalPos);
+        player.setPos(absPigPos.getX() + 8.0D, absPigPos.getY() + 2.0D, absPigPos.getZ() + 8.0D);
+        player.attack(crystal);
+
+        helper.runAfterDelay(2, () -> {
+            helper.assertTrue(!pig.isAlive(), "expected end crystal explosion to kill the pig");
+            helper.assertTrue(
+                helper.getLevel().getBlockState(absStonePos).isAir(),
+                "expected end crystal explosion to destroy the stone"
+            );
+
+            int killCount = countRowsAt(
+                subject,
+                pigObject,
+                NativeSpaceLoggerBridge.VERB_KILL,
+                absPigPos,
+                startTimeMs
+            );
+            int breakCount = countRowsAt(
+                subject,
+                stoneObject,
+                NativeSpaceLoggerBridge.VERB_BREAK,
+                absStonePos,
+                startTimeMs
+            );
+
+            helper.assertTrue(
+                killCount == 1,
+                "expected exactly one pig kill row for attacking player, actual=" + killCount
+            );
+            helper.assertTrue(
+                breakCount == 1,
+                "expected exactly one stone break row for end crystal explosion, actual=" + breakCount
+            );
+            helper.succeed();
+        });
+    }
+
     @GameTest
     public void recordsFillCommandBreaksBlocksForPlayer(GameTestHelper helper) {
         long startTimeMs = System.currentTimeMillis();
@@ -472,7 +590,7 @@ public class SpaceLoggerGameTests {
         CommandSourceStack commandSource = player.createCommandSourceStack()
             .withPermission(PermissionSet.ALL_PERMISSIONS);
         String command = String.format(
-            "/fill %d %d %d %d %d %d air destroy",
+            "/fill %d %d %d %d %d %d air",
             absFirstPos.getX(),
             absFirstPos.getY(),
             absFirstPos.getZ(),
@@ -504,6 +622,53 @@ public class SpaceLoggerGameTests {
             helper.assertTrue(firstBreakCount == 1, "expected exactly one break row at first fill target, actual=" + firstBreakCount);
             helper.assertTrue(secondBreakCount == 1, "expected exactly one break row at second fill target, actual=" + secondBreakCount);
             helper.succeed();
+        });
+    }
+
+    @GameTest(maxTicks = 160)
+    public void recordsSummonTntKillForCommandPlayer(GameTestHelper helper) {
+        long startTimeMs = System.currentTimeMillis();
+        ServerPlayer player = helper.makeMockServerPlayerInLevel();
+        player.setGameMode(GameType.SURVIVAL);
+
+        BlockPos tntPos = new BlockPos(1, 2, 1);
+        BlockPos pigPos = new BlockPos(2, 2, 1);
+        BlockPos absPigPos = helper.absolutePos(pigPos);
+        String subject = NativeSpaceLoggerBridge.subject(player);
+
+        for (int x = 1; x <= 3; x++) {
+            helper.setBlock(new BlockPos(x, 1, 1), Blocks.OBSIDIAN);
+        }
+
+        var pig = helper.spawn(EntityType.PIG, pigPos);
+        pig.setNoAi(true);
+        String pigObject = NativeSpaceLoggerBridge.entityId(pig);
+
+        CommandSourceStack commandSource = player.createCommandSourceStack()
+            .withPermission(PermissionSet.ALL_PERMISSIONS);
+        String command = String.format(
+            "/summon tnt %d %d %d",
+            helper.absolutePos(tntPos).getX(),
+            helper.absolutePos(tntPos).getY(),
+            helper.absolutePos(tntPos).getZ()
+        );
+        helper.getLevel().getServer().getCommands().performPrefixedCommand(commandSource, command);
+
+        player.setPos(absPigPos.getX() + 8.0D, absPigPos.getY() + 2.0D, absPigPos.getZ() + 8.0D);
+
+        helper.succeedWhen(() -> {
+            helper.assertTrue(!pig.isAlive(), "expected summoned TNT explosion to kill the pig");
+            int killCount = countRowsAt(
+                subject,
+                pigObject,
+                NativeSpaceLoggerBridge.VERB_KILL,
+                absPigPos,
+                startTimeMs
+            );
+            helper.assertTrue(
+                killCount == 1,
+                "expected exactly one pig kill row for summon command player, actual=" + killCount
+            );
         });
     }
 

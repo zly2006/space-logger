@@ -2,6 +2,7 @@ package me.zly2006.sl.mixin;
 
 import me.zly2006.sl.SpaceLogger;
 import me.zly2006.sl.jni.NativeSpaceLoggerBridge;
+import me.zly2006.sl.mixinhelper.RecordMixinHelper;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -48,8 +49,18 @@ public abstract class LivingEntityMixin extends Entity  {
         }
 
         Entity attacker = source.getEntity();
-        if (!(attacker instanceof ServerPlayer serverPlayer)) {
-            return;
+        String subject;
+        String subjectExtra;
+        if (attacker instanceof ServerPlayer serverPlayer) {
+            subject = NativeSpaceLoggerBridge.subject(serverPlayer);
+            subjectExtra = NativeSpaceLoggerBridge.subjectExtra(serverPlayer);
+        } else {
+            RecordMixinHelper.OperationContext context = RecordMixinHelper.recording();
+            if (context == null) {
+                return;
+            }
+            subject = context.subject();
+            subjectExtra = context.subjectExtra();
         }
 
         LivingEntity target = (LivingEntity) (Object) this;
@@ -58,10 +69,10 @@ public abstract class LivingEntityMixin extends Entity  {
             pos.getX(),
             pos.getY(),
             pos.getZ(),
-            NativeSpaceLoggerBridge.subject(serverPlayer),
+            subject,
             NativeSpaceLoggerBridge.VERB_HURT,
             NativeSpaceLoggerBridge.entityId(target),
-            NativeSpaceLoggerBridge.subjectExtra(serverPlayer),
+            subjectExtra,
             NativeSpaceLoggerBridge.encodeHurtData(this.getUUID(), dealt)
         );
     }
@@ -72,16 +83,22 @@ public abstract class LivingEntityMixin extends Entity  {
             return;
         }
 
-        ServerPlayer killer = null;
+        String subject;
+        String subjectExtra;
         LivingEntity killCredit = this.getKillCredit();
         if (killCredit instanceof ServerPlayer creditPlayer) {
-            killer = creditPlayer;
+            subject = NativeSpaceLoggerBridge.subject(creditPlayer);
+            subjectExtra = NativeSpaceLoggerBridge.subjectExtra(creditPlayer);
         } else if (source.getEntity() instanceof ServerPlayer sourcePlayer) {
-            killer = sourcePlayer;
-        }
-
-        if (killer == null) {
-            return;
+            subject = NativeSpaceLoggerBridge.subject(sourcePlayer);
+            subjectExtra = NativeSpaceLoggerBridge.subjectExtra(sourcePlayer);
+        } else {
+            RecordMixinHelper.OperationContext context = RecordMixinHelper.recording();
+            if (context == null) {
+                return;
+            }
+            subject = context.subject();
+            subjectExtra = context.subjectExtra();
         }
 
         LivingEntity target = (LivingEntity) (Object) this;
@@ -90,10 +107,10 @@ public abstract class LivingEntityMixin extends Entity  {
             pos.getX(),
             pos.getY(),
             pos.getZ(),
-            NativeSpaceLoggerBridge.subject(killer),
+            subject,
             NativeSpaceLoggerBridge.VERB_KILL,
             NativeSpaceLoggerBridge.entityId(target),
-            NativeSpaceLoggerBridge.subjectExtra(killer),
+            subjectExtra,
             NativeSpaceLoggerBridge.encodeEntityNbt(target)
         );
     }

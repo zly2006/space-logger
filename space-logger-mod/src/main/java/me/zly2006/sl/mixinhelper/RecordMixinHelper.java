@@ -101,6 +101,7 @@ public final class RecordMixinHelper {
 
     public enum OperationCause {
         BREAK_BLOCK,
+        ATTACK_ENTITY,
         COMMAND,
         USE_BLOCK,
         USE_ITEM,
