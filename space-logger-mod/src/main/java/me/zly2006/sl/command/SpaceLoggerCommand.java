@@ -172,11 +172,16 @@ public final class SpaceLoggerCommand {
                 .withClickEvent(new ClickEvent.RunCommand(tpCommand))
         ));
         if (row.dataLen() > 0) {
-            line.append(Component.literal(" "));
-            line.append(Component.literal("(+" + row.dataLen() + ")").withStyle(style ->
-                    style.withColor(ChatFormatting.DARK_GRAY)
-                            .withHoverEvent(new HoverEvent.ShowText(Component.literal("nbt数据大小: " + row.dataLen() + " bytes")))
-            ));
+            if (row.verb() == NativeSpaceLoggerBridge.VERB_COMMAND) {
+                line.append(Component.literal(" "));
+                line.append(Component.literal(new String(row.dataHead())).withStyle(ChatFormatting.DARK_PURPLE));
+            } else {
+                line.append(Component.literal(" "));
+                line.append(Component.literal("(+" + row.dataLen() + ")").withStyle(style ->
+                        style.withColor(ChatFormatting.DARK_GRAY)
+                                .withHoverEvent(new HoverEvent.ShowText(Component.literal("nbt数据大小: " + row.dataLen() + " bytes")))
+                ));
+            }
         }
         return line;
     }
