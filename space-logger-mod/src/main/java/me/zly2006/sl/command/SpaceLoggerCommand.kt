@@ -7,14 +7,19 @@ import com.mojang.brigadier.exceptions.CommandSyntaxException
 import com.mojang.brigadier.exceptions.SimpleCommandExceptionType
 import com.mojang.brigadier.suggestion.Suggestions
 import com.mojang.brigadier.suggestion.SuggestionsBuilder
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.launch
 import me.zly2006.sl.SpaceLogger
 import me.zly2006.sl.jni.NativeSpaceLoggerBridge
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback
 import net.minecraft.ChatFormatting
 import net.minecraft.commands.CommandSourceStack
 import net.minecraft.core.BlockPos
+import net.minecraft.core.Holder
 import net.minecraft.core.registries.BuiltInRegistries
 import net.minecraft.core.registries.Registries
+import net.minecraft.gametest.framework.*
 import net.minecraft.network.chat.ClickEvent
 import net.minecraft.network.chat.Component
 import net.minecraft.network.chat.HoverEvent
@@ -23,12 +28,14 @@ import net.minecraft.resources.Identifier
 import net.minecraft.resources.ResourceKey
 import net.minecraft.server.level.ServerLevel
 import net.minecraft.server.level.ServerPlayer
-import net.minecraft.world.level.Level
+import net.minecraft.util.RandomSource
+import net.minecraft.world.level.portal.TeleportTransition
+import net.minecraft.world.level.storage.LevelData.RespawnData
+import net.minecraft.world.phys.Vec3
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import java.util.LinkedHashSet
-import java.util.Locale
+import java.util.*
 import java.util.concurrent.CompletableFuture
 import java.util.regex.Pattern
 
@@ -50,6 +57,37 @@ object SpaceLoggerCommand {
     @JvmStatic
     fun register() {
         CommandRegistrationCallback.EVENT.register { dispatcher, _, _ ->
+            dispatcher.register("gametest-all") {
+                executes {
+                    val level = it.source.server.overworld()
+                    val random: RandomSource = level.getRandom()
+                    val startPos = BlockPos(
+                        random.nextIntBetweenInclusive(-14999992, 14999992),
+                        -59,
+                        random.nextIntBetweenInclusive(-14999992, 14999992)
+                    )
+                    it.source.player?.teleport(TeleportTransition(level, startPos.bottomCenter, Vec3.ZERO, 0.0f, 0.0f, TeleportTransition.DO_NOTHING))
+                    level.setRespawnData(RespawnData.of(level.dimension(), startPos, 0.0f, 0.0f))
+                    val testRegistry = level.registryAccess().lookupOrThrow(Registries.TEST_INSTANCE)
+                    val testBatches = GameTestBatchFactory.divideIntoBatches(testRegistry.listElements()
+                        .filter { test -> !test!!.value().manualOnly() }
+                        .toList(), GameTestBatchFactory.DIRECT, level)
+                    val runner = GameTestRunner.Builder.fromBatches(testBatches, level)
+                        .newStructureSpawner(StructureGridSpawner(startPos, 8, false)).build()
+                    val testInfos: MutableCollection<GameTestInfo> = runner.getTestInfos()
+                    runner.start()
+                    GlobalScope.launch(it.source.server.asCoroutineDispatcher()) {
+                        while (testInfos.any { info -> !info.isDone }) {
+                            kotlinx.coroutines.delay(50)
+                        }
+                        val passed = testInfos.count { info -> info.error == null }
+                        val total = testInfos.size
+                        it.source.sendSystemMessage(Component.literal("====================").withStyle(ChatFormatting.GREEN))
+                        it.source.sendSystemMessage(Component.literal("所有测试完成: $passed/$total 通过").withStyle(ChatFormatting.GREEN))
+                        it.source.sendSystemMessage(Component.literal("====================").withStyle(ChatFormatting.GREEN))
+                    }
+                }
+            }
             dispatcher.register("sl") {
                 literal("tp") {
                     argument("dimension", StringArgumentType.word()) {

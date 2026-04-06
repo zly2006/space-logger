@@ -22,6 +22,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(net.minecraft.server.level.ServerPlayerGameMode.class)
 public abstract class ServerPlayerGameModeMixin {
+    @org.spongepowered.asm.mixin.Unique
+    private int sl$mainHandCountBeforeUse;
+
     @Shadow
     protected ServerLevel level;
 
@@ -60,6 +63,8 @@ public abstract class ServerPlayerGameModeMixin {
         BlockHitResult hitResult,
         CallbackInfoReturnable<InteractionResult> cir
     ) {
+        this.sl$mainHandCountBeforeUse = stack.getCount();
+        RecordMixinHelper.clearPendingEntityPlacements();
         RecordMixinHelper.playerStartRecording(this.player, RecordMixinHelper.OperationCause.USE_BLOCK);
     }
 
@@ -80,6 +85,25 @@ public abstract class ServerPlayerGameModeMixin {
             return;
         }
         if (stack.getItem() instanceof BlockItem) {
+            return;
+        }
+
+        var placedEntities = RecordMixinHelper.consumePendingEntityPlacements();
+        if (!placedEntities.isEmpty() && stack.getCount() < this.sl$mainHandCountBeforeUse) {
+            for (var placement : placedEntities) {
+                BlockPos pos = placement.pos();
+                SpaceLogger.bridge().appendNow(
+                    pos.getX(),
+                    pos.getY(),
+                    pos.getZ(),
+                    placement.dimension(),
+                    NativeSpaceLoggerBridge.subject(player),
+                    NativeSpaceLoggerBridge.VERB_PLACE,
+                    placement.object(),
+                    NativeSpaceLoggerBridge.subjectExtra(player),
+                    new byte[0]
+                );
+            }
             return;
         }
 
@@ -111,6 +135,7 @@ public abstract class ServerPlayerGameModeMixin {
         BlockHitResult hitResult,
         CallbackInfoReturnable<InteractionResult> cir
     ) {
+        RecordMixinHelper.clearPendingEntityPlacements();
         RecordMixinHelper.playerStopRecording(this.player);
     }
 }

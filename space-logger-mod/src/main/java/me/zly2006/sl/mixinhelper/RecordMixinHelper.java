@@ -1,17 +1,23 @@
 package me.zly2006.sl.mixinhelper;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.List;
 
 import me.zly2006.sl.SpaceLogger;
 import me.zly2006.sl.access.OperationCarrierAccess;
 import me.zly2006.sl.jni.NativeSpaceLoggerBridge;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.level.block.state.BlockState;
 
 public final class RecordMixinHelper {
     private static final ThreadLocal<ArrayDeque<OperationStackEntry>> OPERATION_STACK =
         ThreadLocal.withInitial(ArrayDeque::new);
+    private static final ThreadLocal<ArrayList<PendingEntityPlacement>> PENDING_ENTITY_PLACEMENTS =
+        ThreadLocal.withInitial(ArrayList::new);
 
     private RecordMixinHelper() {
     }
@@ -27,6 +33,45 @@ public final class RecordMixinHelper {
             cause
         );
         pushContext(context, "player recording/" + player.getScoreboardName() + "/" + cause);
+    }
+
+    public static void clearPendingEntityPlacements() {
+        ArrayList<PendingEntityPlacement> placements = PENDING_ENTITY_PLACEMENTS.get();
+        placements.clear();
+        PENDING_ENTITY_PLACEMENTS.remove();
+    }
+
+    public static void recordSpawnedEntity(Entity entity) {
+        if (entity == null || entity instanceof ServerPlayer) {
+            return;
+        }
+
+        OperationContext context = recording();
+        if (context == null) {
+            return;
+        }
+        if (context.cause() != OperationCause.USE_BLOCK && context.cause() != OperationCause.USE_ITEM) {
+            return;
+        }
+
+        PENDING_ENTITY_PLACEMENTS.get().add(
+            new PendingEntityPlacement(
+                NativeSpaceLoggerBridge.dimension(entity.level()),
+                entity.blockPosition(),
+                NativeSpaceLoggerBridge.entityId(entity)
+            )
+        );
+    }
+
+    public static List<PendingEntityPlacement> consumePendingEntityPlacements() {
+        ArrayList<PendingEntityPlacement> placements = PENDING_ENTITY_PLACEMENTS.get();
+        if (placements.isEmpty()) {
+            return List.of();
+        }
+        List<PendingEntityPlacement> copy = List.copyOf(placements);
+        placements.clear();
+        PENDING_ENTITY_PLACEMENTS.remove();
+        return copy;
     }
 
     public static void playerStopRecording(ServerPlayer player) {
@@ -101,6 +146,30 @@ public final class RecordMixinHelper {
         );
     }
 
+    public static void logEntityKillIfNeeded(Entity entity) {
+        if (entity == null || entity instanceof LivingEntity || entity instanceof ServerPlayer) {
+            return;
+        }
+
+        OperationContext context = recording();
+        if (context == null) {
+            return;
+        }
+
+        BlockPos pos = entity.blockPosition();
+        SpaceLogger.bridge().appendNow(
+            pos.getX(),
+            pos.getY(),
+            pos.getZ(),
+            context.dimension(),
+            context.subject(),
+            NativeSpaceLoggerBridge.VERB_KILL,
+            NativeSpaceLoggerBridge.entityId(entity),
+            context.subjectExtra(),
+            NativeSpaceLoggerBridge.encodeEntityNbt(entity)
+        );
+    }
+
     public enum OperationCause {
         BREAK_BLOCK,
         ATTACK_ENTITY,
@@ -115,6 +184,9 @@ public final class RecordMixinHelper {
     }
 
     public record OperationContext(String dimension, String subject, String subjectExtra, OperationCause cause) {
+    }
+
+    public record PendingEntityPlacement(String dimension, BlockPos pos, String object) {
     }
 
     private record OperationStackEntry(OperationContext context, String reason) {

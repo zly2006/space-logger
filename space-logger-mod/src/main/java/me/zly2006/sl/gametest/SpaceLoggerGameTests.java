@@ -22,11 +22,13 @@ import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.ContainerInput;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.boss.enderdragon.EndCrystal;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.entity.monster.zombie.Zombie;
@@ -47,7 +49,6 @@ public class SpaceLoggerGameTests {
         long startTimeMs = System.currentTimeMillis();
 
         ServerPlayer player = makeMockServerPlayerInLevel(helper);
-        player.setGameMode(GameType.SURVIVAL);
 
         net.minecraft.world.entity.monster.zombie.Zombie zombie = helper.spawn(EntityType.ZOMBIE, new BlockPos(1, 1, 1));
         BlockPos absZombiePos = zombie.blockPosition();
@@ -83,7 +84,6 @@ public class SpaceLoggerGameTests {
         long startTimeMs = System.currentTimeMillis();
 
         ServerPlayer player = makeMockServerPlayerInLevel(helper);
-        player.setGameMode(GameType.SURVIVAL);
 
         BlockPos placePos = new BlockPos(1, 1, 1);
         BlockPos breakPos = new BlockPos(2, 1, 1);
@@ -202,7 +202,6 @@ public class SpaceLoggerGameTests {
         long startTimeMs = System.currentTimeMillis();
 
         ServerPlayer player = makeMockServerPlayerInLevel(helper);
-        player.setGameMode(GameType.SURVIVAL);
 
         BlockPos chestPos = new BlockPos(1, 1, 1);
         helper.setBlock(chestPos, Blocks.CHEST);
@@ -323,7 +322,6 @@ public class SpaceLoggerGameTests {
     public void recordsAttachedTorchWhenSupportingBlockBroken(GameTestHelper helper) {
         long startTimeMs = System.currentTimeMillis();
         ServerPlayer player = makeMockServerPlayerInLevel(helper);
-        player.setGameMode(GameType.SURVIVAL);
 
         BlockPos supportPos = new BlockPos(1, 1, 1);
         BlockPos torchPos = supportPos.above();
@@ -391,6 +389,8 @@ public class SpaceLoggerGameTests {
         Connection connection = new Connection(PacketFlow.SERVERBOUND);
         new EmbeddedChannel(new ChannelHandler[]{connection});
         helper.getLevel().getServer().getPlayerList().placeNewPlayer(connection, player, cookie);
+        player.setPos(helper.absolutePos(BlockPos.ZERO).getBottomCenter());
+        player.setGameMode(GameType.SURVIVAL);
         return player;
     }
 
@@ -398,7 +398,6 @@ public class SpaceLoggerGameTests {
     public void recordsChainTntBreakForIgnitingPlayer(GameTestHelper helper) {
         long startTimeMs = System.currentTimeMillis();
         ServerPlayer player = makeMockServerPlayerInLevel(helper);
-        player.setGameMode(GameType.SURVIVAL);
 
         BlockPos tnt1Pos = new BlockPos(1, 2, 1);
         BlockPos tnt2Pos = new BlockPos(4, 2, 1);
@@ -527,10 +526,65 @@ public class SpaceLoggerGameTests {
     }
 
     @GameTest
+    public void recordsEndCrystalPlacementAsPlaceNotUse(GameTestHelper helper) {
+        long startTimeMs = System.currentTimeMillis();
+        ServerPlayer player = makeMockServerPlayerInLevel(helper);
+
+        BlockPos crystalBasePos = new BlockPos(1, 1, 1);
+        BlockPos crystalPos = crystalBasePos.above();
+        BlockPos absBasePos = helper.absolutePos(crystalBasePos);
+        BlockPos absCrystalPos = helper.absolutePos(crystalPos);
+        String subject = NativeSpaceLoggerBridge.subject(player);
+        String obsidianObject = NativeSpaceLoggerBridge.blockId(Blocks.OBSIDIAN.defaultBlockState());
+
+        helper.setBlock(crystalBasePos, Blocks.OBSIDIAN);
+        player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.END_CRYSTAL));
+        player.setPos(absBasePos.getX() - 1.0D, absBasePos.getY() + 1.0D, absBasePos.getZ() + 0.5D);
+        BlockHitResult placeHit = new BlockHitResult(
+            Vec3.atCenterOf(absBasePos),
+            Direction.UP,
+            absBasePos,
+            false
+        );
+        InteractionResult placeResult = player.gameMode.useItemOn(
+            player,
+            helper.getLevel(),
+            player.getItemInHand(InteractionHand.MAIN_HAND),
+            InteractionHand.MAIN_HAND,
+            placeHit
+        );
+        helper.assertTrue(placeResult != InteractionResult.FAIL, "expected end crystal placement to succeed");
+
+        helper.runAfterDelay(2, () -> {
+            EndCrystal crystal = findSingleEndCrystalAt(helper, absCrystalPos);
+            helper.assertTrue(crystal != null, "expected one end crystal to be placed");
+            String crystalObject = NativeSpaceLoggerBridge.entityId(crystal);
+
+            int crystalPlaceCount = countRowsAt(
+                subject,
+                crystalObject,
+                NativeSpaceLoggerBridge.VERB_PLACE,
+                absCrystalPos,
+                startTimeMs
+            );
+            int baseUseCount = countRowsAt(
+                subject,
+                obsidianObject,
+                NativeSpaceLoggerBridge.VERB_USE,
+                absBasePos,
+                startTimeMs
+            );
+
+            helper.assertTrue(crystalPlaceCount == 1, "expected exactly one end crystal place row, actual=" + crystalPlaceCount);
+            helper.assertTrue(baseUseCount == 0, "expected no obsidian use row for end crystal placement, actual=" + baseUseCount);
+            helper.succeed();
+        });
+    }
+
+    @GameTest
     public void recordsEndCrystalExplosionBreakAndKillForAttackingPlayer(GameTestHelper helper) {
         long startTimeMs = System.currentTimeMillis();
         ServerPlayer player = makeMockServerPlayerInLevel(helper);
-        player.setGameMode(GameType.SURVIVAL);
 
         BlockPos crystalBasePos = new BlockPos(1, 1, 1);
         BlockPos crystalPos = new BlockPos(1, 2, 1);
@@ -551,7 +605,27 @@ public class SpaceLoggerGameTests {
         pig.setNoAi(true);
         String pigObject = NativeSpaceLoggerBridge.entityId(pig);
 
-        var crystal = helper.spawn(EntityType.END_CRYSTAL, crystalPos);
+        player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.END_CRYSTAL));
+        BlockPos absCrystalBasePos = helper.absolutePos(crystalBasePos);
+        player.setPos(absCrystalBasePos.getX() - 1.0D, absCrystalBasePos.getY() + 1.0D, absCrystalBasePos.getZ() + 0.5D);
+        BlockHitResult placeHit = new BlockHitResult(
+            Vec3.atCenterOf(absCrystalBasePos),
+            Direction.UP,
+            absCrystalBasePos,
+            false
+        );
+        InteractionResult placeResult = player.gameMode.useItemOn(
+            player,
+            helper.getLevel(),
+            player.getItemInHand(InteractionHand.MAIN_HAND),
+            InteractionHand.MAIN_HAND,
+            placeHit
+        );
+        helper.assertTrue(placeResult != InteractionResult.FAIL, "expected end crystal placement to succeed");
+        var crystal = findSingleEndCrystalAt(helper, helper.absolutePos(crystalPos));
+        helper.assertTrue(crystal != null, "expected placed end crystal to exist before attack");
+        String crystalObject = NativeSpaceLoggerBridge.entityId(crystal);
+
         player.setPos(absPigPos.getX() + 8.0D, absPigPos.getY() + 2.0D, absPigPos.getZ() + 8.0D);
         player.attack(crystal);
 
@@ -569,6 +643,13 @@ public class SpaceLoggerGameTests {
                 absPigPos,
                 startTimeMs
             );
+            int crystalKillCount = countRowsAt(
+                subject,
+                crystalObject,
+                NativeSpaceLoggerBridge.VERB_KILL,
+                helper.absolutePos(crystalPos),
+                startTimeMs
+            );
             int breakCount = countRowsAt(
                 subject,
                 stoneObject,
@@ -582,6 +663,10 @@ public class SpaceLoggerGameTests {
                 "expected exactly one pig kill row for attacking player, actual=" + killCount
             );
             helper.assertTrue(
+                crystalKillCount == 1,
+                "expected exactly one end crystal kill row for attacking player, actual=" + crystalKillCount
+            );
+            helper.assertTrue(
                 breakCount == 1,
                 "expected exactly one stone break row for end crystal explosion, actual=" + breakCount
             );
@@ -593,7 +678,6 @@ public class SpaceLoggerGameTests {
     public void recordsFillCommandBreaksBlocksForPlayer(GameTestHelper helper) {
         long startTimeMs = System.currentTimeMillis();
         ServerPlayer player = makeMockServerPlayerInLevel(helper);
-        player.setGameMode(GameType.SURVIVAL);
 
         BlockPos firstPos = new BlockPos(1, 1, 1);
         BlockPos secondPos = new BlockPos(2, 1, 1);
@@ -647,8 +731,6 @@ public class SpaceLoggerGameTests {
     public void recordsCommandHistoryWithoutSlashPrefix(GameTestHelper helper) {
         long startTimeMs = System.currentTimeMillis();
         ServerPlayer player = makeMockServerPlayerInLevel(helper);
-        player.setGameMode(GameType.SURVIVAL);
-        player.setPos(5.5D, 2.0D, 5.5D);
 
         BlockPos commandPos = player.blockPosition();
         String subject = NativeSpaceLoggerBridge.subject(player);
@@ -689,7 +771,6 @@ public class SpaceLoggerGameTests {
     @GameTest
     public void reportsStatsSummary(GameTestHelper helper) {
         ServerPlayer player = makeMockServerPlayerInLevel(helper);
-        player.setGameMode(GameType.SURVIVAL);
         BlockPos pos = helper.absolutePos(new BlockPos(8, 1, 8));
 
         SpaceLogger.bridge().appendNow(
@@ -720,7 +801,6 @@ public class SpaceLoggerGameTests {
     public void recordsSummonTntKillForCommandPlayer(GameTestHelper helper) {
         long startTimeMs = System.currentTimeMillis();
         ServerPlayer player = makeMockServerPlayerInLevel(helper);
-        player.setGameMode(GameType.SURVIVAL);
 
         BlockPos tntPos = new BlockPos(1, 2, 1);
         BlockPos pigPos = new BlockPos(2, 2, 1);
@@ -767,7 +847,6 @@ public class SpaceLoggerGameTests {
     public void flushMergesContinuousRemoveThenAdd(GameTestHelper helper) {
         long startTimeMs = System.currentTimeMillis();
         ServerPlayer player = makeMockServerPlayerInLevel(helper);
-        player.setGameMode(GameType.SURVIVAL);
 
         BlockPos absPos = helper.absolutePos(new BlockPos(6, 1, 6));
         ItemStack sample = new ItemStack(Items.DIRT, 4);
@@ -841,7 +920,6 @@ public class SpaceLoggerGameTests {
     public void flushDoesNotMergeAcrossUseBarrier(GameTestHelper helper) {
         long startTimeMs = System.currentTimeMillis();
         ServerPlayer player = makeMockServerPlayerInLevel(helper);
-        player.setGameMode(GameType.SURVIVAL);
 
         BlockPos absPos = helper.absolutePos(new BlockPos(7, 1, 7));
         ItemStack sample = new ItemStack(Items.DIRT, 2);
@@ -934,6 +1012,14 @@ public class SpaceLoggerGameTests {
             }
         }
         return -1;
+    }
+
+    private static EndCrystal findSingleEndCrystalAt(GameTestHelper helper, BlockPos pos) {
+        var crystals = helper.getLevel().getEntitiesOfClass(
+            EndCrystal.class,
+            new AABB(pos)
+        );
+        return crystals.isEmpty() ? null : crystals.getFirst();
     }
 
     private static int countRowsAt(String subject, String object, int verbId, BlockPos pos, long startTimeMs) {

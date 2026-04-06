@@ -7,10 +7,12 @@
     "AbstractContainerMenuMixin",
     "BlockItemMixin",
     "CommandsMixin",
+    "EntityMixin",
     "LevelChunkMixin",
     "LivingEntityMixin",
     "PlayerMixin",
     "PrimedTntMixin",
+    "ServerLevelMixin",
     "ServerExplosionMixin",
     "ServerPlayerGameModeMixin"
   ],

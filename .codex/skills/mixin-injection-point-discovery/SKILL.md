@@ -10,7 +10,7 @@ Use this workflow to find safe, reproducible mixin targets before writing inject
 ## Inputs
 
 - Target Minecraft common jar (for this project):
-  - `/Users/zhaoliyan/IdeaProjects/space-logger/space-logger-mod/.gradle/loom-cache/minecraftMaven/net/minecraft/minecraft-common-9a7fd27717/26.1-rc-2/minecraft-common-9a7fd27717-26.1-rc-2.jar`
+  - `./space-logger-mod/.gradle/loom-cache/minecraftMaven/net/minecraft/minecraft-common-9a7fd27717/26.1-rc-2/minecraft-common-9a7fd27717-26.1-rc-2.jar`
 - Feature intent (what behavior to observe/record/change)
 
 ## Workflow

@@ -212,6 +212,10 @@ tasks.withType<JavaExec>().configureEach {
     dependsOn(bundleBundledNativeLibs)
 }
 
+tasks.named("sourcesJar") {
+    dependsOn(bundleBundledNativeLibs)
+}
+
 tasks.test {
     useJUnitPlatform()
 }
