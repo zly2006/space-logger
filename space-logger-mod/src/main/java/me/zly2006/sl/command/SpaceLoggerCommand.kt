@@ -82,6 +82,11 @@ object SpaceLoggerCommand {
                         }
                         val passed = testInfos.count { info -> info.error == null }
                         val total = testInfos.size
+                        it.source.server.playerList.players.toMutableList().forEach {
+                            if ("MockPlayer" in it.scoreboardName) {
+                                it.connection.disconnect(Component.literal("test completed"))
+                            }
+                        }
                         it.source.sendSystemMessage(Component.literal("====================").withStyle(ChatFormatting.GREEN))
                         it.source.sendSystemMessage(Component.literal("所有测试完成: $passed/$total 通过").withStyle(ChatFormatting.GREEN))
                         it.source.sendSystemMessage(Component.literal("====================").withStyle(ChatFormatting.GREEN))

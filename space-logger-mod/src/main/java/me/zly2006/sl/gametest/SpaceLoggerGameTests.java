@@ -375,8 +375,11 @@ public class SpaceLoggerGameTests {
         });
     }
 
+    private static int count;
+
     public static ServerPlayer makeMockServerPlayerInLevel(GameTestHelper helper) {
-        CommonListenerCookie cookie = CommonListenerCookie.createInitial(new GameProfile(UUID.randomUUID(), "MockPlayer" + (System.currentTimeMillis() % 1000)), false);
+        CommonListenerCookie cookie = CommonListenerCookie.createInitial(new GameProfile(UUID.randomUUID(), "MockPlayer" + "关注幽帘幽梦谢谢喵～".charAt(count % 9)), false);
+        count++;
         ServerPlayer player = new ServerPlayer(helper.getLevel().getServer(), helper.getLevel(), cookie.gameProfile(), cookie.clientInformation()) {
             {
                 Objects.requireNonNull(helper);
