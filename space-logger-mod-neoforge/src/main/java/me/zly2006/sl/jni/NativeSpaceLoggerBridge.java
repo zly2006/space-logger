@@ -1,0 +1,601 @@
+package me.zly2006.sl.jni;
+
+import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.RegistryAccess;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.NbtIo;
+import net.minecraft.nbt.NbtOps;
+import net.minecraft.nbt.Tag;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.RegistryOps;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.state.BlockState;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+public final class NativeSpaceLoggerBridge implements AutoCloseable {
+    private static final Logger LOGGER = LoggerFactory.getLogger("space-logger-mod/NativeBridge");
+    private static final Object LIB_LOCK = new Object();
+    private static final int DEFAULT_FLUSH_ROWS = 4096;
+    private static final byte[] INVENTORY_DATA_MAGIC = new byte[] {'S', 'L', 'I', '1'};
+    private static final int INVENTORY_DATA_HEADER_BYTES = 12;
+    private static final int QUERY_DATA_HEAD_BYTES = 12;
+    private static final Set<UUID> RECENT_PLACE_PLAYERS = ConcurrentHashMap.newKeySet();
+    public static final int VERB_HURT = 0;
+    public static final int VERB_KILL = 1;
+    public static final int VERB_BREAK = 2;
+    public static final int VERB_PLACE = 3;
+    public static final int VERB_USE = 4;
+    public static final int VERB_ADD_ITEM = 5;
+    public static final int VERB_REMOVE_ITEM = 6;
+    public static final int VERB_COMMAND = 7;
+    public static final int VERB_MASK_ALL = -1;
+
+    private static volatile boolean loaded;
+
+    private final Path dbDir;
+    private final int memtableFlushRows;
+    private long nativePtr;
+
+    private NativeSpaceLoggerBridge(Path dbDir, int memtableFlushRows, long nativePtr) {
+        this.dbDir = dbDir;
+        this.memtableFlushRows = memtableFlushRows;
+        this.nativePtr = nativePtr;
+    }
+
+    public static NativeSpaceLoggerBridge open(Path gameDir, Path dbDir, int memtableFlushRows) {
+        ensureNativeLoaded(gameDir);
+        int flushRows = memtableFlushRows <= 0 ? DEFAULT_FLUSH_ROWS : memtableFlushRows;
+        long ptr = nativeCreate(dbDir.toAbsolutePath().toString(), flushRows);
+        if (ptr == 0L) {
+            throw new IllegalStateException("nativeCreate returned null pointer");
+        }
+        return new NativeSpaceLoggerBridge(dbDir.toAbsolutePath(), flushRows, ptr);
+    }
+
+    public Path dbDir() {
+        return this.dbDir;
+    }
+
+    public int memtableFlushRows() {
+        return this.memtableFlushRows;
+    }
+
+    public boolean isClosed() {
+        synchronized (this) {
+            return this.nativePtr == 0L;
+        }
+    }
+
+    @Override
+    public void close() {
+        long ptrToClose;
+        synchronized (this) {
+            ptrToClose = this.nativePtr;
+            if (ptrToClose == 0L) {
+                return;
+            }
+            this.nativePtr = 0L;
+        }
+        nativeClose(ptrToClose);
+    }
+
+    public void append(
+        int x,
+        int y,
+        int z,
+        String dimension,
+        String subject,
+        int verb,
+        String object,
+        long timeMs,
+        String subjectExtra,
+        byte[] data
+    ) {
+        long ptr = requireNativePtr();
+        boolean ok = nativeAppend(
+            ptr,
+            x,
+            y,
+            z,
+            safe(dimension),
+            safe(subject),
+            verb,
+            safe(object),
+            timeMs,
+            safe(subjectExtra),
+            data == null ? new byte[0] : data
+        );
+        if (!ok) {
+            throw new IllegalStateException("native append returned false");
+        }
+    }
+
+    public void appendNow(
+        int x,
+        int y,
+        int z,
+        String dimension,
+        String subject,
+        int verb,
+        String object,
+        String subjectExtra,
+        byte[] data
+    ) {
+        append(x, y, z, dimension, subject, verb, object, System.currentTimeMillis(), subjectExtra, data);
+    }
+
+    public int countAll() {
+        return nativeCountAll(requireNativePtr());
+    }
+
+    public int countByVerb(int verb) {
+        return nativeCountByVerb(requireNativePtr(), verb);
+    }
+
+    public List<QueryRow> queryRows(
+        String dimension,
+        String subject,
+        String object,
+        int verbMask,
+        int minX,
+        int maxX,
+        int minY,
+        int maxY,
+        int minZ,
+        int maxZ,
+        long afterTimeMs,
+        long beforeTimeMs,
+        int limit
+    ) {
+        int safeLimit = limit <= 0 ? 20 : limit;
+        QueryRow[] rows = nativeQuery(
+            requireNativePtr(),
+            safe(dimension),
+            safe(subject),
+            safe(object),
+            verbMask,
+            minX,
+            maxX,
+            minY,
+            maxY,
+            minZ,
+            maxZ,
+            afterTimeMs,
+            beforeTimeMs,
+            safeLimit
+        );
+        if (rows == null || rows.length == 0) {
+            return Collections.emptyList();
+        }
+        return Arrays.asList(rows);
+    }
+
+    public void resetForTests() {
+        nativeReset(requireNativePtr());
+    }
+
+    public void flush() {
+        boolean ok = nativeFlush(requireNativePtr());
+        if (!ok) {
+            throw new IllegalStateException("native flush returned false");
+        }
+    }
+
+    public DbStats stats(int latestSegmentLimit) {
+        return nativeStats(requireNativePtr(), latestSegmentLimit);
+    }
+
+    private static void ensureNativeLoaded(Path gameDir) {
+        synchronized (LIB_LOCK) {
+            if (loaded) {
+                return;
+            }
+            loadNativeLibrary(gameDir);
+            loaded = true;
+        }
+    }
+
+    private long requireNativePtr() {
+        synchronized (this) {
+            if (this.nativePtr == 0L) {
+                throw new IllegalStateException("NativeSpaceLoggerBridge is closed");
+            }
+            return this.nativePtr;
+        }
+    }
+
+    public static String normalizeIdentifier(ResourceLocation identifier) {
+        if (identifier == null) {
+            return "unknown";
+        }
+        String value = identifier.toString();
+        if (value.startsWith("minecraft:")) {
+            return value.substring("minecraft:".length());
+        }
+        return value;
+    }
+
+    public static String entityId(Entity entity) {
+        return normalizeIdentifier(BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()));
+    }
+
+    public static String blockId(BlockState state) {
+        return normalizeIdentifier(BuiltInRegistries.BLOCK.getKey(state.getBlock()));
+    }
+
+    public static String itemId(ItemStack stack) {
+        return normalizeIdentifier(BuiltInRegistries.ITEM.getKey(stack.getItem()));
+    }
+
+    public static String subject(Player player) {
+        return player.getScoreboardName();
+    }
+
+    public static String dimension(Level level) {
+        return level == null ? "unknown" : normalizeIdentifier(level.dimension().location());
+    }
+
+    public static String dimension(ResourceKey<Level> dimension) {
+        return dimension == null ? "unknown" : normalizeIdentifier(dimension.location());
+    }
+
+    public static String subjectExtra(Player player) {
+        return player.getUUID().toString();
+    }
+
+    public static BlockPos safeBlockPos(BlockPos pos) {
+        return pos == null ? BlockPos.ZERO : pos;
+    }
+
+    public static byte[] encodeHurtData(UUID targetUuid, float damage) {
+        ByteBuffer buffer = ByteBuffer.allocate(16 + 4).order(ByteOrder.LITTLE_ENDIAN);
+        buffer.putLong(targetUuid.getMostSignificantBits());
+        buffer.putLong(targetUuid.getLeastSignificantBits());
+        buffer.putFloat(damage);
+        return buffer.array();
+    }
+
+    public static byte[] encodeEntityNbt(Entity entity) {
+        try {
+            CompoundTag tag = entity.saveWithoutId(new CompoundTag());
+
+            try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                 DataOutputStream dos = new DataOutputStream(baos)) {
+                NbtIo.write(tag, dos);
+                dos.flush();
+                return baos.toByteArray();
+            }
+        } catch (Exception e) {
+            LOGGER.warn("Failed to serialize entity nbt for {}", entity, e);
+            return new byte[0];
+        }
+    }
+
+    public static byte[] encodeItemNbt(ItemStack stack, RegistryAccess registryAccess) {
+        if (stack == null || stack.isEmpty()) {
+            return new byte[0];
+        }
+
+        try {
+            RegistryOps<Tag> ops = RegistryOps.create(NbtOps.INSTANCE, registryAccess);
+            Tag encoded = ItemStack.CODEC.encodeStart(ops, stack).getOrThrow(IllegalStateException::new);
+            if (!(encoded instanceof CompoundTag tag)) {
+                return new byte[0];
+            }
+
+            try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                 DataOutputStream dos = new DataOutputStream(baos)) {
+                NbtIo.write(tag, dos);
+                dos.flush();
+                return baos.toByteArray();
+            }
+        } catch (Exception e) {
+            LOGGER.warn("Failed to serialize item nbt for {}", stack, e);
+            return new byte[0];
+        }
+    }
+
+    public static byte[] encodeInventoryDeltaData(ItemStack stack, int quantityDelta, RegistryAccess registryAccess) {
+        if (stack == null || stack.isEmpty() || quantityDelta == 0) {
+            return new byte[0];
+        }
+
+        ItemStack template = stack.copyWithCount(1);
+        byte[] itemNbt = encodeItemNbt(template, registryAccess);
+        ByteBuffer buffer = ByteBuffer
+            .allocate(INVENTORY_DATA_HEADER_BYTES + itemNbt.length)
+            .order(ByteOrder.LITTLE_ENDIAN);
+
+        // Layout:
+        // [0..3]   magic "SLI1"
+        // [4..7]   signed quantity delta (add: positive, remove: negative)
+        // [8..11]  item nbt length in bytes
+        // [12..]   item nbt payload
+        buffer.put(INVENTORY_DATA_MAGIC);
+        buffer.putInt(quantityDelta);
+        buffer.putInt(itemNbt.length);
+        buffer.put(itemNbt);
+        return buffer.array();
+    }
+
+    public static String normalizeCommand(String command) {
+        if (command == null) {
+            return "";
+        }
+        String normalized = command.trim();
+        while (normalized.startsWith("/")) {
+            normalized = normalized.substring(1).trim();
+        }
+        return normalized;
+    }
+
+    public static String commandObject(String normalizedCommand) {
+        if (normalizedCommand == null || normalizedCommand.isBlank()) {
+            return "";
+        }
+        int split = normalizedCommand.indexOf(' ');
+        return split < 0 ? normalizedCommand : normalizedCommand.substring(0, split);
+    }
+
+    public static byte[] encodeCommandData(String normalizedCommand) {
+        if (normalizedCommand == null || normalizedCommand.isBlank()) {
+            return new byte[0];
+        }
+        return normalizedCommand.getBytes(StandardCharsets.UTF_8);
+    }
+
+    public static void markRecentPlace(Player player) {
+        if (player == null) {
+            return;
+        }
+        RECENT_PLACE_PLAYERS.add(player.getUUID());
+    }
+
+    public static boolean consumeRecentPlace(Player player) {
+        if (player == null) {
+            return false;
+        }
+        return RECENT_PLACE_PLAYERS.remove(player.getUUID());
+    }
+
+    public static int verbMaskSingle(int verb) {
+        if (verb < 0 || verb >= 32) {
+            return 0;
+        }
+        return 1 << verb;
+    }
+
+    public static int verbIdFromName(String name) {
+        if (name == null || name.isBlank()) {
+            return -1;
+        }
+        return switch (name.toLowerCase(Locale.ROOT)) {
+            case "hurt" -> VERB_HURT;
+            case "kill" -> VERB_KILL;
+            case "break" -> VERB_BREAK;
+            case "place" -> VERB_PLACE;
+            case "use" -> VERB_USE;
+            case "add_item" -> VERB_ADD_ITEM;
+            case "remove_item" -> VERB_REMOVE_ITEM;
+            case "command" -> VERB_COMMAND;
+            default -> -1;
+        };
+    }
+
+    public static String verbName(int verb) {
+        return switch (verb) {
+            case VERB_HURT -> "hurt";
+            case VERB_KILL -> "kill";
+            case VERB_BREAK -> "break";
+            case VERB_PLACE -> "place";
+            case VERB_USE -> "use";
+            case VERB_ADD_ITEM -> "add_item";
+            case VERB_REMOVE_ITEM -> "remove_item";
+            case VERB_COMMAND -> "command";
+            default -> "unknown";
+        };
+    }
+
+    private static void loadNativeLibrary(Path gameDir) {
+        BundledNative bundledNative = bundledNativeForCurrentPlatform();
+        String resourcePath = "natives/" + bundledNative.resourceDirectory() + "/" + bundledNative.libraryFileName();
+        Path nativeCacheDir = gameDir.toAbsolutePath().resolve(".space-logger").resolve("natives");
+
+        try {
+            Files.createDirectories(nativeCacheDir);
+            Path extractedLib = Files.createTempFile(
+                nativeCacheDir,
+                "space-logger-native-",
+                "-" + bundledNative.libraryFileName()
+            );
+            extractedLib.toFile().deleteOnExit();
+
+            try (InputStream resource = NativeSpaceLoggerBridge.class.getClassLoader().getResourceAsStream(resourcePath)) {
+                if (resource == null) {
+                    throw new IllegalStateException("Bundled native resource not found: " + resourcePath);
+                }
+                Files.copy(resource, extractedLib, StandardCopyOption.REPLACE_EXISTING);
+            }
+
+            System.load(extractedLib.toAbsolutePath().toString());
+            LOGGER.info("Loaded bundled native space logger from {}", extractedLib);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to extract bundled native space logger: " + resourcePath, e);
+        }
+    }
+
+    private static BundledNative bundledNativeForCurrentPlatform() {
+        String osName = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        String arch = normalizeArch(System.getProperty("os.arch", ""));
+
+        if (osName.contains("linux") && arch.equals("x86_64")) {
+            return new BundledNative("linux-x86_64", "libspace_logger_native.so");
+        }
+        if ((osName.contains("mac") || osName.contains("darwin")) && arch.equals("aarch64")) {
+            return new BundledNative("macos-aarch64", "libspace_logger_native.dylib");
+        }
+
+        throw new IllegalStateException("Unsupported platform for bundled space logger native: os=" + osName + ", arch=" + arch);
+    }
+
+    private static String normalizeArch(String arch) {
+        String normalized = arch.toLowerCase(Locale.ROOT);
+        return switch (normalized) {
+            case "amd64", "x86_64" -> "x86_64";
+            case "arm64", "aarch64" -> "aarch64";
+            default -> normalized;
+        };
+    }
+
+    private record BundledNative(String resourceDirectory, String libraryFileName) {}
+
+    private static String safe(String value) {
+        return value == null ? "" : value;
+    }
+
+    private static native long nativeCreate(String dbDir, int memtableFlushRows);
+
+    private static native void nativeClose(long nativePtr);
+
+    private static native boolean nativeAppend(
+        long nativePtr,
+        int x,
+        int y,
+        int z,
+        String dimension,
+        String subject,
+        int verb,
+        String object,
+        long timeMs,
+        String subjectExtra,
+        byte[] data
+    );
+
+    private static native int nativeCountAll(long nativePtr);
+
+    private static native int nativeCountByVerb(long nativePtr, int verb);
+
+    private static native QueryRow[] nativeQuery(
+        long nativePtr,
+        String dimension,
+        String subject,
+        String object,
+        int verbMask,
+        int minX,
+        int maxX,
+        int minY,
+        int maxY,
+        int minZ,
+        int maxZ,
+        long afterTimeMs,
+        long beforeTimeMs,
+        int limit
+    );
+
+    private static native void nativeReset(long nativePtr);
+
+    private static native boolean nativeFlush(long nativePtr);
+
+    private static native DbStats nativeStats(long nativePtr, int latestSegmentLimit);
+
+    public record QueryRow(
+        long timeMs,
+        int x,
+        int y,
+        int z,
+        String dimension,
+        String subject,
+        int verb,
+        String object,
+        String subjectExtra,
+        int dataLen,
+        byte[] dataHead
+    ) {
+        public QueryRow {
+            dataHead = dataHead == null ? new byte[0] : dataHead;
+        }
+
+        @Override
+        public byte[] dataHead() {
+            return dataHead.clone();
+        }
+
+        public String verbName() {
+            return NativeSpaceLoggerBridge.verbName(verb);
+        }
+
+        public boolean hasInventoryDataHeader() {
+            return dataHead.length >= QUERY_DATA_HEAD_BYTES
+                && dataHead[0] == INVENTORY_DATA_MAGIC[0]
+                && dataHead[1] == INVENTORY_DATA_MAGIC[1]
+                && dataHead[2] == INVENTORY_DATA_MAGIC[2]
+                && dataHead[3] == INVENTORY_DATA_MAGIC[3];
+        }
+
+        public int quantityDelta() {
+            if (!hasInventoryDataHeader()) {
+                return 0;
+            }
+            return ByteBuffer.wrap(dataHead, 4, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
+        }
+
+        public int nbtPayloadLen() {
+            if (!hasInventoryDataHeader()) {
+                return 0;
+            }
+            return ByteBuffer.wrap(dataHead, 8, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
+        }
+    }
+
+    public record SegmentStats(
+        long id,
+        String fileName,
+        int rowCount,
+        long minSeq,
+        long maxSeq,
+        long minTimeMs,
+        long maxTimeMs,
+        long sizeBytes,
+        int minX,
+        int maxX,
+        int minY,
+        int maxY,
+        int minZ,
+        int maxZ
+    ) {}
+
+    public record DbStats(
+        int schemaVersion,
+        int totalRows,
+        int memtableRows,
+        int segmentCount,
+        long walSizeBytes,
+        long diskUsageBytes,
+        SegmentStats[] latestSegments
+    ) {}
+}

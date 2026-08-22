@@ -2,19 +2,27 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="${ROOT_DIR}/space-logger-mod"
+PROJECT_NAME="${SPACE_LOGGER_GRADLE_PROJECT:-space-logger-mod}"
+PROJECT_DIR="${ROOT_DIR}/${PROJECT_NAME}"
 JAVA25_HOME="${SPACE_LOGGER_JAVA_HOME:-/opt/homebrew/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home}"
-GRADLE_BIN="${SPACE_LOGGER_GRADLE_BIN:-${HOME}/.gradle/wrapper/dists/gradle-9.2.1-bin/2t0n5ozlw9xmuyvbp7dnzaxug/gradle-9.2.1/bin/gradle}"
+GRADLE_BIN="${SPACE_LOGGER_GRADLE_BIN:-${ROOT_DIR}/space-logger-mod/gradlew}"
 GAMETEST_REPORT="${SPACE_LOGGER_GAMETEST_REPORT:-/tmp/space-logger-gametest.xml}"
 DEFAULT_JAVA_TOOL_OPTIONS="-Dfabric-api.gametest=true -Dfabric-api.gametest.report-file=${GAMETEST_REPORT}"
 
-if [[ -n "${JAVA_TOOL_OPTIONS:-}" ]]; then
-  export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS} ${DEFAULT_JAVA_TOOL_OPTIONS}"
-else
-  export JAVA_TOOL_OPTIONS="${DEFAULT_JAVA_TOOL_OPTIONS}"
+if [[ "${PROJECT_NAME}" == "space-logger-mod" ]]; then
+  if [[ -n "${JAVA_TOOL_OPTIONS:-}" ]]; then
+    export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS} ${DEFAULT_JAVA_TOOL_OPTIONS}"
+  else
+    export JAVA_TOOL_OPTIONS="${DEFAULT_JAVA_TOOL_OPTIONS}"
+  fi
 fi
 
 export JAVA_HOME="${JAVA25_HOME}"
+
+if [[ ! -d "${PROJECT_DIR}" ]]; then
+  echo "Gradle project directory does not exist: ${PROJECT_DIR}" >&2
+  exit 2
+fi
 
 exec "${GRADLE_BIN}" -p "${PROJECT_DIR}" "$@" \
   -Dorg.gradle.java.installations.paths="${JAVA25_HOME}"

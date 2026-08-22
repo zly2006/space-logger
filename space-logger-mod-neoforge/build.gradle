@@ -1,0 +1,242 @@
+import org.gradle.api.tasks.Sync
+
+plugins {
+    id 'java-library'
+    id 'org.jetbrains.kotlin.jvm' version '2.3.10'
+    id 'maven-publish'
+    id 'net.neoforged.moddev' version '2.0.144'
+    id 'idea'
+}
+
+version = mod_version
+group = mod_group_id
+
+base {
+    archivesName = archives_base_name
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(21)
+    withSourcesJar()
+}
+
+neoForge {
+    version = project.neo_version
+
+    parchment {
+        mappingsVersion = project.parchment_mappings_version
+        minecraftVersion = project.parchment_minecraft_version
+    }
+
+    runs {
+        client {
+            client()
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        }
+        server {
+            server()
+            programArgument '--nogui'
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        }
+        gameTestServer {
+            type = 'gameTestServer'
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        }
+        configureEach {
+            logLevel = org.slf4j.event.Level.INFO
+        }
+    }
+
+    mods {
+        "${mod_id}" {
+            sourceSet(sourceSets.main)
+        }
+    }
+
+    unitTest {
+        enable()
+        testedMod = mods.space_logger_mod
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    jarJar(implementation('org.jetbrains.kotlin:kotlin-stdlib:2.3.10')) {
+        version {
+            strictly '[2.3,2.4)'
+            prefer '2.3.10'
+        }
+    }
+    additionalRuntimeClasspath 'org.jetbrains.kotlin:kotlin-stdlib:2.3.10'
+
+    testImplementation platform('org.junit:junit-bom:5.13.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter-api'
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+def nativeProfile = providers.gradleProperty('spaceLoggerNativeProfile')
+    .map { it.equalsIgnoreCase('release') ? 'release' : 'debug' }
+    .orElse('debug')
+def cargoExecutable = providers.environmentVariable('CARGO')
+    .orElse(providers.environmentVariable('CARGO_BIN'))
+    .orElse(providers.environmentVariable('HOME').map { "${it}/.cargo/bin/cargo" })
+    .get()
+def zigExecutable = providers.environmentVariable('SPACE_LOGGER_ZIG_BIN')
+    .orElse(providers.environmentVariable('ZIG'))
+    .orElse('zig')
+    .get()
+def nativeSourceDir = file('../space-logger-mod/native-logger')
+def bundledNativeResourcesDir = layout.buildDirectory.dir('generated/native-resources/main')
+def generatedGameTestResourcesDir = layout.buildDirectory.dir('generated/gametest-resources/main')
+def nativeTargets = [
+    [taskName: 'cargoBuildLinuxX64Native', resourceDirectory: 'linux-x86_64', cargoTarget: 'x86_64-unknown-linux-gnu', libraryFileName: 'libspace_logger_native.so', linuxCross: true],
+    [taskName: 'cargoBuildMacOsArm64Native', resourceDirectory: 'macos-aarch64', cargoTarget: 'aarch64-apple-darwin', libraryFileName: 'libspace_logger_native.dylib', linuxCross: false],
+]
+def linuxCrossLinkerScript = layout.buildDirectory.file('native-tooling/zig-x86_64-unknown-linux-gnu-linker.sh')
+
+def executableAvailable = { String executable ->
+    def executableFile = new File(executable)
+    if (executable.contains(File.separator)) {
+        return executableFile.isFile() && executableFile.canExecute()
+    }
+    return (System.getenv('PATH') ?: '').split(File.pathSeparator)
+        .any { searchDirectory ->
+            def candidate = new File(searchDirectory, executable)
+            candidate.isFile() && candidate.canExecute()
+        }
+}
+
+tasks.register('prepareLinuxCrossLinker') {
+    outputs.file(linuxCrossLinkerScript)
+    doLast {
+        def scriptFile = linuxCrossLinkerScript.get().asFile
+        scriptFile.parentFile.mkdirs()
+        scriptFile.text = "#!/bin/sh\nexec \"${zigExecutable}\" cc -target x86_64-linux-gnu \"\$@\"\n"
+        scriptFile.setExecutable(true)
+    }
+}
+
+def cargoBuildTasks = nativeTargets.collect { target ->
+    tasks.register(target.taskName, Exec) {
+        if (target.linuxCross) {
+            dependsOn tasks.named('prepareLinuxCrossLinker')
+        }
+        def profile = nativeProfile.get()
+        def outputFile = file("${nativeSourceDir}/target/${target.cargoTarget}/${profile}/${target.libraryFileName}")
+        inputs.files(file("${nativeSourceDir}/Cargo.toml"), file("${nativeSourceDir}/Cargo.lock"), file('../Cargo.toml'), file('../Cargo.lock'))
+        inputs.dir(file("${nativeSourceDir}/src"))
+        inputs.dir(file('../src'))
+        outputs.file(outputFile)
+        onlyIf {
+            if (!target.linuxCross || executableAvailable(zigExecutable)) {
+                return true
+            }
+            if (outputFile.exists()) {
+                return false
+            }
+            throw new GradleException("Zig is required to build the missing Linux native library: ${outputFile}")
+        }
+        workingDir nativeSourceDir
+        commandLine cargoExecutable, 'build', '--target', target.cargoTarget, *(profile == 'release' ? ['--release'] : [])
+        if (target.linuxCross) {
+            environment 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER', linuxCrossLinkerScript.get().asFile.absolutePath
+        }
+        doLast {
+            if (!outputFile.exists()) {
+                throw new GradleException("Native library not found after cargo build: ${outputFile}")
+            }
+        }
+    }
+}
+
+tasks.register('bundleBundledNativeLibs', Sync) {
+    dependsOn cargoBuildTasks
+    into bundledNativeResourcesDir
+    nativeTargets.each { target ->
+        def profile = nativeProfile.get()
+        from("${nativeSourceDir}/target/${target.cargoTarget}/${profile}/${target.libraryFileName}") {
+            into("natives/${target.resourceDirectory}")
+        }
+    }
+}
+
+sourceSets.main.resources.srcDir bundledNativeResourcesDir
+sourceSets.main.resources.srcDir generatedGameTestResourcesDir
+
+tasks.register('generateEmptyGameTestStructure') {
+    def outputFile = generatedGameTestResourcesDir.map {
+        it.file('data/space_logger_mod/structure/empty.nbt')
+    }
+    outputs.file(outputFile)
+    doLast {
+        def targetFile = outputFile.get().asFile
+        targetFile.parentFile.mkdirs()
+        targetFile.bytes = Base64.decoder.decode(
+            'H4sIAAAAAAAC/zXMsQ5AMBSF4SMaWiLex2w22i+5khtVtHfy9Gow/MOXnJwGcDBJHi4BfNk/B8tBRYVTk5131eLPdf9VX+RZlT8WFmaig9EdEniNtOlAEvNhO5LSzDHJGYD+xgsnF2yKcgAAAA=='
+        )
+    }
+}
+
+def generateModMetadata = tasks.register('generateModMetadata', ProcessResources) {
+    def replaceProperties = [
+        minecraft_version: minecraft_version,
+        minecraft_version_range: minecraft_version_range,
+        neo_version: neo_version,
+        loader_version_range: loader_version_range,
+        mod_id: mod_id,
+        mod_name: mod_name,
+        mod_license: mod_license,
+        mod_version: mod_version,
+    ]
+    inputs.properties replaceProperties
+    expand replaceProperties
+    from 'src/main/templates'
+    into 'build/generated/sources/modMetadata'
+}
+
+sourceSets.main.resources.srcDir generateModMetadata
+neoForge.ideSyncTask generateModMetadata
+
+tasks.named('processResources') {
+    dependsOn tasks.named('bundleBundledNativeLibs')
+    dependsOn tasks.named('generateEmptyGameTestStructure')
+}
+
+tasks.named('sourcesJar') {
+    dependsOn tasks.named('bundleBundledNativeLibs')
+    dependsOn tasks.named('generateEmptyGameTestStructure')
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 21
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21
+    }
+}
+
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
+}
+
+tasks.withType(Jar).configureEach {
+    from('LICENSE.txt') {
+        rename { "${it}_space-logger-mod-neoforge" }
+    }
+}
+
+publishing {
+    publications {
+        register('mavenJava', MavenPublication) {
+            artifactId = archives_base_name
+            from components.java
+        }
+    }
+}
